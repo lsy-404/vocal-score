@@ -1,0 +1,27 @@
+OpenSheetMusicDisplay 2.2.1
+Source: https://github.com/opensheetmusicdisplay/opensheetmusicdisplay
+Distribution: npm opensheetmusicdisplay@2.2.1
+License: BSD-3-Clause; see OSMD-LICENSE.txt and bundled license notices.
+
+Platform Kit Fluent 0.2.6 (CSS)
+Source: https://github.com/lsy-404/platform-kit
+Distribution: https://github.com/lsy-404/platform-kit/releases/download/fluent-v0.2.6/platform-kit-fluent-0.2.6.tgz
+License: Apache-2.0; see FLUENT-LICENSE.txt and FLUENT-NOTICE.txt.
+The stylesheet is included without modification. Native controls use its component classes and theme tokens.
+
+Tonal chord detection 4.9.2
+Source: https://github.com/tonaljs/tonal
+Distribution: @tonaljs/chord-detect, bundled with its dependencies in src/vendor/tonal-analysis.js and the production application bundle.
+License: MIT; see tonal-analysis.LICENSE and bundled license notices.
+
+Vue 3.5.44 and Vue I18n 11.4.14
+Sources: https://github.com/vuejs/core and https://github.com/intlify/vue-i18n
+License: MIT; see VUE-LICENSE.txt, VUE-I18N-LICENSE.txt and BUNDLED-LICENSES.txt.
+
+Pinyin Pro 3.29.5
+Source: https://github.com/zh-lx/pinyin-pro
+License: MIT; see PINYIN-LICENSE.txt and BUNDLED-LICENSES.txt.
+
+jsPDF 4.2.1 and PDF.js 6.4.299
+Sources: https://github.com/parallax/jsPDF and https://github.com/mozilla/pdf.js
+Licenses: MIT and Apache-2.0; see JSPDF-LICENSE.txt, PDFJS-LICENSE.txt and BUNDLED-LICENSES.txt.
