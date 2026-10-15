@@ -1,5 +1,5 @@
 <script setup>
-import {computed,nextTick,ref} from 'vue';
+import {computed,nextTick,ref,watch} from 'vue';
 import {t} from '../i18n.js';
 
 const props=defineProps({targets:{type:Array,default:()=>[]},pageNumber:{type:Number,required:true},disabled:Boolean});
@@ -13,8 +13,9 @@ async function start(target){
   await nextTick();input.value?.focus();input.value?.select();
 }
 function cancel(){editing.value=null;}
+watch(()=>props.targets,cancel);
 function save(){
-  if(!editing.value)return;
+  if(!editing.value||props.disabled)return;
   const target=editing.value;editing.value=null;
   if(draft.value!==target.text)emit('commit',{target,value:draft.value});
 }

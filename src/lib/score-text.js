@@ -12,7 +12,7 @@ export function pdfTextRectangle(bounds,svgBounds,paper,margin=10){
   };
 }
 
-export function collectScoreTextTargets(pages,{project,title,settings}){
+export function collectScoreTextTargets(pages,{id,project,title,settings}){
   const dimensions=getPaperDimensions(settings.paperSize,settings.orientation);
   return Array.from(pages).flatMap((svg,pageIndex)=>{
     const svgBounds=svg.getBoundingClientRect();
@@ -24,13 +24,13 @@ export function collectScoreTextTargets(pages,{project,title,settings}){
       if(typeof text!=='string')return [];
       const rectangle=pdfTextRectangle(node.getBoundingClientRect(),svgBounds,dimensions);
       if(!rectangle)return [];
-      return [{id:`${pageIndex}:${kind}:${node.dataset.trackId||''}:${node.dataset.noteIndex||''}`,pageNumber:pageIndex+1,kind,text,trackId:track?.id,noteIndex,...rectangle}];
+      return [{id:`${pageIndex}:${kind}:${node.dataset.trackId||''}:${node.dataset.noteIndex||''}`,documentId:id,pageNumber:pageIndex+1,kind,text,trackId:track?.id,noteIndex,...rectangle}];
     });
   });
 }
 
 export function applyScoreTextEdit(document,target,value){
-  if(!document||typeof value!=='string'||!target)return false;
+  if(!document||typeof value!=='string'||!target||target.documentId!==document.id)return false;
   const text=value.slice(0,target.kind==='lyric'?300:160);
   if(target.kind==='title'){document.title=text;return true;}
   if(target.kind==='header'||target.kind==='by'){document.settings[target.kind]=text;return true;}

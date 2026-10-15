@@ -2,6 +2,7 @@
 import {computed,ref,shallowRef,watch,nextTick,onMounted,onBeforeUnmount,toRaw,defineAsyncComponent} from 'vue';
 import {parseSvp,createScore} from './lib/converter.js';
 import {renderJianpu} from './lib/jianpu.js';
+import {renderStaffScore} from './lib/staff.js';
 import {analyzeScore,estimateKeys,recommendTranspose} from './lib/analysis.js';
 import {annotateScore,scoreMetadata} from './lib/annotations.js';
 import {decoratePages} from './lib/page-layout.js';
@@ -85,7 +86,7 @@ function scheduleRender(save=true){
   if(signature===requestedSignature)return;
   requestedSignature=signature;revision++;renderController?.abort();downloadPdfCache=null;
   rendered.value=null;pdfError.value='';error.value='';warnings.value=[];textTargets.value=[];clearTimeout(scheduled);
-  if(!current.value){pending=false;busy.value=false;pdfBytes.value=null;score.value?.replaceChildren();return;}
+  if(!current.value){pending=false;busy.value=false;pdfBytes.value=null;engravingKey='';score.value?.replaceChildren();return;}
   busy.value=true;
   pending=true;scheduled=setTimeout(renderPending,100);
 }
@@ -126,17 +127,11 @@ async function renderPending(){
       if(nextEngravingKey!==engravingKey){
       score.value.replaceChildren();engravingMessages=[];
       if(settings.view==='staff'){
-        if(!globalThis.opensheetmusicdisplay?.OpenSheetMusicDisplay)throw new Error(t('乐谱排版组件未能加载，请刷新页面后重试。'));
-        const osmd=new globalThis.opensheetmusicdisplay.OpenSheetMusicDisplay(score.value,{autoResize:false,backend:'svg',drawTitle:false,drawSubtitle:false,drawComposer:false,drawPartNames:true,drawMeasureNumbers:settings.measureNumbers,drawingParameters:'compacttight'});
-        const dimensions=getPaperDimensions(settings.paperSize,settings.orientation);osmd.setCustomPageFormat(dimensions.width,dimensions.height);
-        osmd.EngravingRules.DefaultFontFamily=layout.fontFamily;osmd.EngravingRules.VexFlowTextFontFamily=layout.fontFamily;osmd.EngravingRules.LyricsHeight=layout.lyricFontSize/10;osmd.EngravingRules.RenderMeasureNumbersOnlyAtSystemStart=false;
-        await osmd.load(converted.xml);
-        if(version!==revision)continue;
-        osmd.Zoom=0.85;osmd.render();
+        await renderStaffScore(score.value,converted.xml,{...layout,paperSize:settings.paperSize,orientation:settings.orientation,model:converted.model});
       }else{
         const dimensions=getPaperDimensions(settings.paperSize,settings.orientation);
         const header=layout.title?layout.headerFontSize+layout.titleFontSize+(layout.by?layout.headerFontSize:0)+24:layout.header||layout.by?Math.max(30,layout.headerFontSize*(layout.by?2:1)+12):0;
-        const numbered=await renderJianpu(converted.xml,score.value,{...layout,width:(dimensions.width-20)*5,height:(dimensions.height-20)*5-header-(layout.showPageNumbers?24:0),showPageNumbers:false,drawTitle:false});engravingMessages.push(...numbered.warnings);
+        const numbered=await renderJianpu(converted.xml,score.value,{...layout,width:(dimensions.width-20)*5,height:(dimensions.height-20)*5-header-(layout.showPageNumbers?24:0),showPageNumbers:false,drawTitle:false,model:converted.model});engravingMessages.push(...numbered.warnings);
       }
       if(version!==revision)continue;
       engravingKey=nextEngravingKey;
@@ -206,7 +201,7 @@ async function exportPdf(){
   }catch(cause){if(version===revision)pdfError.value=readableError(cause);}
   finally{exportingPdf.value=false;}
 }
-function editScoreText({target,value}){applyScoreTextEdit(current.value,target,value);}
+function editScoreText({target,value}){if(!busy.value&&!exportingPdf.value)applyScoreTextEdit(current.value,target,value);}
 function openSidebar(section){activeSidebar.value=section;sidebarCollapsed.value=false;}
 function preventDrop(event){event.preventDefault();}
 function drop(event){dragging.value=false;importFiles(event.dataTransfer.files);}
