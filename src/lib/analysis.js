@@ -69,6 +69,7 @@ function correlation(left, right) {
 function pitchClassDurations(model) {
   const histogram = Array(12).fill(0);
   for (const track of Array.isArray(model?.tracks) ? model.tracks : []) {
+    if (track?.percussion) continue;
     for (const note of Array.isArray(track?.notes) ? track.notes : []) {
       const start = Number(note?.start);
       const end = Number(note?.end);
@@ -103,6 +104,7 @@ export function estimateKeys(model) {
 function transposeNotes(model) {
   const notes = [];
   for (const track of Array.isArray(model?.tracks) ? model.tracks : []) {
+    if (track?.percussion) continue;
     for (const note of Array.isArray(track?.notes) ? track.notes : []) {
       const start = Number(note?.start);
       const end = Number(note?.end);
@@ -196,6 +198,7 @@ function normalizeMeasures(model) {
 function notesByMeasure(model, measures) {
   const buckets = measures.map(() => []);
   for (const [trackIndex, track] of (Array.isArray(model?.tracks) ? model.tracks : []).entries()) {
+    if (track?.percussion) continue;
     for (const note of Array.isArray(track?.notes) ? track.notes : []) {
       const start = Number(note?.start);
       const end = Number(note?.end);

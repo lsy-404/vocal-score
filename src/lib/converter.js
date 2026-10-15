@@ -1,3 +1,5 @@
+import { detectKeyChanges } from './modulation.js';
+
 export const QUARTER = 705600000;
 
 const finite = value => Number.isFinite(Number(value));
@@ -202,25 +204,100 @@ function meterAtBar(meters, bar) {
 
 function quantize(value, step) { return Math.max(0, Math.round(value / step) * step); }
 
-function decomposeDuration(ticks, divisions) {
-  const values = [];
-  let rest = ticks;
-  const types = [
+function noteValues(divisions) {
+  return [
     ['whole', divisions * 4], ['half', divisions * 2], ['quarter', divisions], ['eighth', divisions / 2],
     ['16th', divisions / 4], ['32nd', divisions / 8], ['64th', divisions / 16]
-  ].filter(([, duration]) => Number.isInteger(duration) && duration > 0);
-  const candidates = types.flatMap(([type, duration]) => [
+  ].filter(([, duration]) => Number.isInteger(duration) && duration > 0).flatMap(([type, duration]) => [
     { type, dots: 0, duration },
     { type, dots: 1, duration: duration * 1.5 },
     { type, dots: 2, duration: duration * 1.75 }
   ]).filter(item => Number.isInteger(item.duration)).sort((a, b) => b.duration - a.duration);
-  while (rest > 0) {
-    const selected = candidates.find(item => item.duration <= rest);
-    if (!selected) return null;
-    values.push(selected);
-    rest -= selected.duration;
+}
+
+// Beat starts within a measure, ending with the measure length. Compound meters group by three; odd x/8 meters end with a group of three.
+function beatStarts(meter, divisions, length) {
+  const unit = divisions * 4 / meter.denominator;
+  const count = meter.numerator;
+  if (!Number.isInteger(unit)) return [0, length];
+  const groups = meter.denominator >= 8 && count % 3 === 0 ? Array(count / 3).fill(3)
+    : meter.denominator >= 8 && count > 3 ? [...Array((count - (count % 2 ? 3 : 0)) / 2).fill(2), ...(count % 2 ? [3] : [])]
+    : meter.denominator >= 8 ? [count] : Array(count).fill(1);
+  const starts = [0];
+  for (const group of groups) starts.push(starts.at(-1) + group * unit);
+  return starts;
+}
+
+// Splits [start, end) into written values that show the beat: within a beat any single value fits; from a beat a value may
+// span whole beats or be dotted past the next beat. Rests additionally keep the middle of an even bar visible.
+function spellSpan(start, end, starts, values, rest) {
+  const count = starts.length - 1;
+  const middle = count >= 4 && count % 2 === 0 ? starts[count / 2] : null;
+  const pieces = [];
+  for (let cursor = start; cursor < end;) {
+    let beat = 0;
+    while (beat < count - 1 && starts[beat + 1] <= cursor) beat += 1;
+    const beatEnd = starts[beat + 1];
+    let value;
+    if (cursor === starts[beat]) {
+      value = values.find(item => {
+        const stop = cursor + item.duration;
+        if (stop > end) return false;
+        if (stop <= beatEnd) return true;
+        const onBeat = starts.includes(stop);
+        if (rest) return onBeat && (middle === null || stop <= middle || cursor >= middle || (cursor === 0 && stop === starts[count]));
+        return onBeat || (item.dots === 1 && starts.includes(cursor + item.duration / 1.5));
+      });
+    } else {
+      // An off-beat note lasting one beat (eighth–quarter–eighth) stays whole unless it would hide the middle of the bar.
+      const beatLength = beatEnd - starts[beat];
+      const syncopated = !rest && cursor - starts[beat] === beatLength / 2 && cursor + beatLength <= end && beatEnd !== middle && beat + 1 < count;
+      const limit = Math.min(end, beatEnd);
+      value = (syncopated && values.find(item => item.duration === beatLength && !item.dots))
+        || values.find(item => item.duration === limit - cursor) || values.find(item => cursor + item.duration <= limit);
+    }
+    if (!value) return null;
+    pieces.push({ start: cursor, duration: value.duration, type: value.type, dots: value.dots });
+    cursor += value.duration;
   }
-  return values;
+  return pieces;
+}
+
+const BEAM_LEVELS = { eighth: 1, '16th': 2, '32nd': 3, '64th': 4 };
+
+// Beams notes shorter than a quarter within each beat; four plain eighths share one beam across a half bar of an even x/4 meter.
+function beamPieces(pieces, starts, meter) {
+  const count = starts.length - 1;
+  const beatOf = tick => { let beat = 0; while (beat < count - 1 && starts[beat + 1] <= tick) beat += 1; return beat; };
+  const beamable = piece => !piece.span.rest && BEAM_LEVELS[piece.type];
+  const group = pieces.map(piece => beatOf(piece.start));
+  if (meter.denominator === 4 && count % 2 === 0) {
+    for (let beat = 0; beat < count; beat += 2) {
+      const members = pieces.filter((piece, index) => group[index] === beat || group[index] === beat + 1);
+      if (members.length === 4 && members.every(piece => beamable(piece) && piece.type === 'eighth' && !piece.dots)) {
+        pieces.forEach((piece, index) => { if (group[index] === beat + 1) group[index] = beat; });
+      }
+    }
+  }
+  for (let index = 0; index < pieces.length;) {
+    let stop = index;
+    while (beamable(pieces[index]) && stop + 1 < pieces.length && beamable(pieces[stop + 1]) && group[stop + 1] === group[index]) stop += 1;
+    if (stop > index) {
+      const run = pieces.slice(index, stop + 1), levels = run.map(piece => BEAM_LEVELS[piece.type]);
+      run.forEach((piece, position) => {
+        piece.beams = [];
+        for (let level = 1; level <= levels[position]; level += 1) {
+          const previous = position > 0 && levels[position - 1] >= level;
+          const next = position < run.length - 1 && levels[position + 1] >= level;
+          const value = previous && next ? 'continue' : next ? 'begin' : previous ? 'end'
+            : position === 0 ? 'forward hook' : position === run.length - 1 ? 'backward hook'
+            : piece.start % (piece.duration * 2) === 0 ? 'forward hook' : 'backward hook';
+          piece.beams.push(`<beam number="${level}">${value}</beam>`);
+        }
+      });
+    }
+    index = stop + 1;
+  }
 }
 
 function pitchXml(midi, fifths) {
@@ -243,37 +320,69 @@ function musicXmlNoteId(note, segmentIndex = 0, measureIndex = 0, partIndex = 0,
   return `svp-n${sourceTrackIndex}-${sourceNoteIndex}-p${partIndex}-v${laneIndex + 1}-o${fallbackNoteIndex}-m${measureIndex}-s${segmentIndex}`;
 }
 
-function noteXml(note, duration, divisions, fifths, tieStart = false, tieStop = false, lyricMode = 'normal', measureIndex = 0, partIndex = 0, laneIndex = 0, fallbackNoteIndex = 0) {
-  const parts = [`<note id="${musicXmlNoteId(note, 0, measureIndex, partIndex, laneIndex, fallbackNoteIndex)}">`];
-  parts.push(pitchXml(note.pitch, fifths));
-  parts.push(`<duration>${duration}</duration>`);
-  const decoded = decomposeDuration(duration, divisions);
-  if (!decoded) throw new Error(`Cannot represent duration ${duration} at the selected grid.`);
-  const selected = decoded[0];
-  if (selected.dots || decoded.length > 1) {
-    return decoded.map((item, index) => {
-      const tieIn = tieStop || index > 0;
-      const tieOut = tieStart || index < decoded.length - 1;
-      const ties = `${tieIn ? '<tie type="stop"/>' : ''}${tieOut ? '<tie type="start"/>' : ''}`;
-      const notations = `${tieIn ? '<tied type="stop"/>' : ''}${tieOut ? '<tied type="start"/>' : ''}`;
-      return `<note id="${musicXmlNoteId(note, index, measureIndex, partIndex, laneIndex, fallbackNoteIndex)}">${pitchXml(note.pitch, fifths)}<duration>${item.duration}</duration>${ties}<voice>${note.voice}</voice><type>${item.type}</type>${'<dot/>'.repeat(item.dots)}${notations ? `<notations>${notations}</notations>` : ''}${index === 0 && lyricMode !== 'continue' ? lyricXml(note.lyrics, lyricMode) : index === 0 && lyricMode === 'continue' ? '<lyric><extend type="continue"/></lyric>' : ''}</note>`;
-    }).join('');
-  }
-  if (tieStop) parts.push('<tie type="stop"/>');
-  if (tieStart) parts.push('<tie type="start"/>');
-  parts.push(`<voice>${note.voice}</voice>`);
-  parts.push(`<type>${selected.type}</type>`);
-  const notations = `${tieStop ? '<tied type="stop"/>' : ''}${tieStart ? '<tied type="start"/>' : ''}`;
-  if (notations) parts.push(`<notations>${notations}</notations>`);
-  parts.push(lyricMode === 'continue' ? '<lyric><extend type="continue"/></lyric>' : lyricXml(note.lyrics, lyricMode));
-  parts.push('</note>');
-  return parts.join('');
+const CLEFS = {
+  treble: '<clef><sign>G</sign><line>2</line></clef>',
+  bass: '<clef><sign>F</sign><line>4</line></clef>',
+  alto: '<clef><sign>C</sign><line>3</line></clef>',
+  percussion: '<clef><sign>percussion</sign></clef>'
+};
+
+// Staff positions for General MIDI drum keys: [display step, octave, notehead].
+const DRUM_POSITIONS = new Map([
+  [35, ['F', 4]], [36, ['F', 4]], [37, ['C', 5, 'x']], [38, ['C', 5]], [39, ['C', 5, 'x']], [40, ['C', 5]], [41, ['A', 4]], [42, ['G', 5, 'x']],
+  [43, ['A', 4]], [44, ['D', 4, 'x']], [45, ['D', 5]], [46, ['G', 5, 'x']], [47, ['D', 5]], [48, ['E', 5]], [49, ['A', 5, 'x']], [50, ['E', 5]],
+  [51, ['F', 5, 'x']], [52, ['A', 5, 'x']], [53, ['F', 5]], [55, ['A', 5, 'x']], [57, ['A', 5, 'x']], [59, ['F', 5, 'x']]
+]);
+
+function unpitchedXml(pitch) {
+  const [step, octave, head] = DRUM_POSITIONS.get(pitch) ?? ['C', 5];
+  return [`<unpitched><display-step>${step}</display-step><display-octave>${octave}</display-octave></unpitched>`, head ? `<notehead>${head}</notehead>` : ''];
 }
 
-function restXml(duration, divisions, voice) {
-  const decoded = decomposeDuration(duration, divisions);
-  if (!decoded) throw new Error(`Cannot represent rest duration ${duration} at the selected grid.`);
-  return decoded.map(item => `<note><rest/><duration>${item.duration}</duration><voice>${voice}</voice><type>${item.type}</type>${'<dot/>'.repeat(item.dots)}</note>`).join('');
+function pieceXml(piece, fifths, measureIndex, partIndex, laneIndex, percussion = false) {
+  const { span } = piece;
+  if (span.rest) return `<note><rest/><duration>${piece.duration}</duration><voice>${laneIndex + 1}</voice><type>${piece.type}</type>${'<dot/>'.repeat(piece.dots)}</note>`;
+  const tieIn = piece.index > 0 || span.before;
+  const tieOut = !piece.last || span.after;
+  const ties = `${tieIn ? '<tie type="stop"/>' : ''}${tieOut ? '<tie type="start"/>' : ''}`;
+  const notations = `${tieIn ? '<tied type="stop"/>' : ''}${tieOut ? '<tied type="start"/>' : ''}`;
+  const write = (note, fallbackNoteIndex, chord) => {
+    const [pitch, notehead] = percussion ? unpitchedXml(note.pitch) : [pitchXml(note.pitch, fifths), ''];
+    const lyric = chord || piece.index > 0 ? '' : span.lyricMode === 'continue' ? '<lyric><extend type="continue"/></lyric>' : lyricXml(note.lyrics, span.lyricMode);
+    return `<note id="${musicXmlNoteId(note, piece.index, measureIndex, partIndex, laneIndex, fallbackNoteIndex)}">${chord ? '<chord/>' : ''}${pitch}<duration>${piece.duration}</duration>${ties}<voice>${laneIndex + 1}</voice><type>${piece.type}</type>${'<dot/>'.repeat(piece.dots)}${notehead}${chord ? '' : (piece.beams ?? []).join('')}${notations ? `<notations>${notations}</notations>` : ''}${lyric}</note>`;
+  };
+  return [write(span.note, span.fallbackNoteIndex, false), ...span.chord.map(member => write(member.note, member.fallbackNoteIndex, true))].join('');
+}
+
+// Tempo points become readable marks: whole BPM, one point per grid position, and runs of small steps written as rit./accel.
+function tempoMarks(tempos, step) {
+  const points = [];
+  for (const tempo of tempos) {
+    const point = { position: quantize(tempo.position, step), bpm: Math.round(tempo.bpm * 100) / 100 };
+    if (points.at(-1)?.position === point.position) points[points.length - 1] = point;
+    else points.push(point);
+  }
+  const small = (from, to) => Math.abs(to.bpm - from.bpm) <= Math.max(2, from.bpm * 0.06) && to.position - from.position <= QUARTER * 4;
+  const marks = [];
+  let shown = null;
+  for (let index = 0; index < points.length;) {
+    const direction = Math.sign((points[index + 1]?.bpm ?? points[index].bpm) - points[index].bpm);
+    let last = index;
+    while (direction && last + 1 < points.length && Math.sign(points[last + 1].bpm - points[last].bpm) === direction && small(points[last], points[last + 1])) last += 1;
+    if (last - index >= 2) {
+      const first = points[index], final = points[last];
+      if (Math.round(final.bpm) !== Math.round(first.bpm)) {
+        marks.push({ position: first.position, bpm: Math.round(first.bpm) === shown ? null : first.bpm, words: direction < 0 ? 'rit.' : 'accel.' });
+        marks.push({ position: final.position, bpm: final.bpm });
+        shown = Math.round(final.bpm);
+      }
+      index = last + 1;
+      continue;
+    }
+    if (Math.round(points[index].bpm) !== shown) { marks.push(points[index]); shown = Math.round(points[index].bpm); }
+    index += 1;
+  }
+  return marks;
 }
 
 function lyricXml(lyrics, mode) {
@@ -291,7 +400,8 @@ function lyricXml(lyrics, mode) {
 function partitionVoices(notes, step) {
   const lanes = [];
   for (const note of notes) {
-    let lane = lanes.find(items => items.at(-1).end <= note.start);
+    // A note sharing both start and end with a voice's last note joins it as a chord.
+    let lane = lanes.find(items => items.at(-1).end <= note.start || (items.at(-1).start === note.start && items.at(-1).end === note.start + note.duration));
     if (!lane) { lane = []; lanes.push(lane); }
     lane.push({ ...note, end: note.start + note.duration });
   }
@@ -441,15 +551,19 @@ function overlapRatio(notes, signal) {
   return Math.min(1, covered / total);
 }
 
-export function createScore(project, { trackIds, grid = 16, transpose = 0, fifths = 0, title, mergeContinuations = false, pitchAdjustment = { enabled: true, thresholdCents: 50 } } = {}) {
+export function createScore(project, { trackIds, grid = 16, transpose = 0, fifths = 0, title, mergeContinuations = false, modulation = false, pitchAdjustment = { enabled: true, thresholdCents: 50 } } = {}) {
   if (!project || !Array.isArray(project.tracks)) throw new TypeError('Project must contain parsed tracks.');
   if (![4, 8, 16, 32].includes(grid)) throw new RangeError('Grid must be 4, 8, 16, or 32.');
   if (trackIds !== undefined && !Array.isArray(trackIds)) throw new TypeError('Track IDs must be an array.');
   if (typeof mergeContinuations !== 'boolean') throw new TypeError('mergeContinuations must be a boolean.');
   if (!pitchAdjustment || typeof pitchAdjustment !== 'object' || typeof pitchAdjustment.enabled !== 'boolean' || !finite(pitchAdjustment.thresholdCents) || Number(pitchAdjustment.thresholdCents) <= 0 || Number(pitchAdjustment.thresholdCents) > 1200) throw new RangeError('Pitch adjustment requires an enabled flag and threshold between 0 and 1200 cents.');
   if (!finite(transpose) || !Number.isInteger(Number(transpose)) || !finite(fifths) || !Number.isInteger(Number(fifths)) || Number(fifths) < -7 || Number(fifths) > 7) throw new RangeError('Invalid transposition or key signature.');
-  const selected = trackIds === undefined ? project.tracks : project.tracks.filter(track => trackIds.includes(track.id));
-  if (!selected.length) throw new Error('Select at least one vocal track.');
+  const chosen = trackIds === undefined ? project.tracks : project.tracks.filter(track => trackIds.includes(track.id));
+  if (!chosen.length) throw new Error('Select at least one vocal track.');
+  // Instrumental sources are laid out in score order (woodwinds, brass, percussion, keyboards, voices, strings) and never merged.
+  const instrumental = chosen.some(track => track.instrument);
+  const selected = instrumental ? [...chosen].sort((a, b) => (a.instrument?.order ?? 80) - (b.instrument?.order ?? 80)) : chosen;
+  const merging = mergeContinuations && !instrumental;
   const warnings = [...(project.warnings || [])];
   const divisions = grid;
   const step = QUARTER * 4 / grid;
@@ -506,13 +620,13 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
     return { ...track, sourceIndex, lanes };
   });
   const sourcePartCount = normalized.length;
-  const mergeResult = mergeContinuations ? mergeDisjointNotes(normalized) : {
+  const mergeResult = merging ? mergeDisjointNotes(normalized) : {
     outputTracks: normalized,
     movedNoteCount: 0,
     moves: []
   };
-  const outputTracks = mergeContinuations ? mergeResult.outputTracks : normalized;
-  if (mergeContinuations && !outputTracks.length) throw new Error('Selected tracks contain no vocal notes.');
+  const outputTracks = merging ? mergeResult.outputTracks : normalized;
+  if (merging && !outputTracks.length) throw new Error('Selected tracks contain no vocal notes.');
   for (const track of outputTracks) {
     if (track.lanes.length > 1) warnings.push(`${track.name}: overlapping notes are rendered as ${track.lanes.length} voices.`);
   }
@@ -546,39 +660,62 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
     bar += 1;
     if (bar > 10000) throw new Error('Score exceeds the supported measure limit.');
   }
+  const tick = position => position / QUARTER * divisions;
+  const clefs = outputTracks.map(track => {
+    if (track.instrument?.percussion) return 'percussion';
+    if (track.instrument?.clef === 'bass' || track.instrument?.clef === 'alto') return track.instrument.clef;
+    const pitches = track.lanes.flat().map(note => note.pitch).sort((a, b) => a - b);
+    return (pitches[pitches.length >> 1] ?? 60) < (track.instrument ? 55 : 50) ? 'bass' : 'treble';
+  });
+  const keyChanges = modulation ? detectKeyChanges(measures, outputTracks.filter((track, index) => clefs[index] !== 'percussion').flatMap(track => track.lanes.flat().map(note => ({ start: tick(note.start), end: tick(note.end), pitch: note.pitch }))), { initialFifths: Math.trunc(fifths), divisions }) : [];
+  const measureFifths = [];
+  for (const [index] of measures.entries()) measureFifths.push(keyChanges.find(change => change.measureIndex === index)?.fifths ?? measureFifths.at(-1) ?? Math.trunc(fifths));
+  const marks = tempoMarks(tempos, step);
+  const values = noteValues(divisions);
   const parts = outputTracks.map((track, partIndex) => {
     const id = `P${partIndex + 1}`;
     const body = measures.map((measure, measureIndex) => {
       const changingMeter = measureIndex === 0 || measure.meter !== measures[measureIndex - 1].meter;
-      const attrs = measureIndex === 0 || changingMeter
-        ? `<attributes><divisions>${divisions}</divisions>${measureIndex === 0 ? `<key><fifths>${Math.trunc(fifths)}</fifths></key>` : ''}${changingMeter ? `<time><beats>${measure.meter.numerator}</beats><beat-type>${measure.meter.denominator}</beat-type></time>` : ''}${measureIndex === 0 ? '<clef><sign>G</sign><line>2</line></clef>' : ''}</attributes>` : '';
-      const directions = tempos.filter(tempo => tempo.position >= measure.start / divisions * QUARTER && tempo.position < measure.end / divisions * QUARTER);
-      const directionXml = directions.map(tempo => {
-        const offset = quantize(tempo.position, step) / QUARTER * divisions - measure.start;
-        return `<direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${xml(tempo.bpm)}</per-minute></metronome></direction-type>${offset ? `<offset>${offset}</offset>` : ''}<sound tempo="${xml(tempo.bpm)}"/></direction>`;
+      // Drum staves carry no key signature (OSMD ignores print-object="no", so they stay in C throughout).
+      const keyXml = clefs[partIndex] === 'percussion' ? (measureIndex === 0 ? '<key><fifths>0</fifths></key>' : '')
+        : measureIndex === 0 || measureFifths[measureIndex] !== measureFifths[measureIndex - 1] ? `<key><fifths>${measureFifths[measureIndex]}</fifths></key>` : '';
+      const attrs = keyXml || changingMeter
+        ? `<attributes>${measureIndex === 0 ? `<divisions>${divisions}</divisions>` : ''}${keyXml}${changingMeter ? `<time><beats>${measure.meter.numerator}</beats><beat-type>${measure.meter.denominator}</beat-type></time>` : ''}${measureIndex === 0 ? CLEFS[clefs[partIndex]] : ''}</attributes>` : '';
+      const directionXml = marks.filter(mark => tick(mark.position) >= measure.start && tick(mark.position) < measure.end).map(mark => {
+        const offset = tick(mark.position) - measure.start;
+        const types = `${mark.words ? `<direction-type><words font-style="italic">${mark.words}</words></direction-type>` : ''}${mark.bpm !== null ? `<direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${Math.round(mark.bpm)}</per-minute></metronome></direction-type>` : ''}`;
+        return `<direction placement="above">${types}${offset ? `<offset>${offset}</offset>` : ''}${mark.bpm !== null ? `<sound tempo="${xml(mark.bpm)}"/>` : ''}</direction>`;
       }).join('');
+      const measureLength = measure.end - measure.start;
+      const starts = beatStarts(measure.meter, divisions, measureLength);
       const voiceXml = [];
       track.lanes.forEach((lane, laneIndex) => {
         let local = 0;
-        const events = [];
-      lane.forEach((note, fallbackNoteIndex) => {
-          const start = Math.max(measure.start, note.start / QUARTER * divisions);
-          const end = Math.min(measure.end, note.end / QUARTER * divisions);
+        const spans = [];
+        lane.forEach((note, fallbackNoteIndex) => {
+          const start = Math.max(measure.start, tick(note.start));
+          const end = Math.min(measure.end, tick(note.end));
           if (end <= start || start >= measure.end || end <= measure.start) return;
+          const previous = spans.at(-1);
+          if (previous && !previous.rest && previous.note.start === note.start && previous.note.end === note.end) { previous.chord.push({ note, fallbackNoteIndex }); return; }
           const onset = Math.round(start - measure.start);
           const duration = Math.round(end - start);
-          if (onset > local) events.push({ at: local, xml: restXml(Math.round(onset - local), divisions, laneIndex + 1) });
-          const before = note.start / QUARTER * divisions < measure.start;
-          const after = note.end / QUARTER * divisions > measure.end;
+          if (onset > local) spans.push({ rest: true, start: local, end: onset });
+          const before = tick(note.start) < measure.start;
+          const after = tick(note.end) > measure.end;
           const lyricMode = before ? (after || note.lyricMode !== 'stop' ? 'continue' : 'stop') : after && note.lyricMode === 'stop' ? 'continue' : note.lyricMode;
-          const item = { ...note, voice: laneIndex + 1 };
-          events.push({ at: onset, xml: noteXml(item, duration, divisions, Math.trunc(fifths), after, before, lyricMode, measureIndex, partIndex, laneIndex, fallbackNoteIndex) });
+          spans.push({ rest: false, start: onset, end: onset + duration, note, chord: [], before, after, lyricMode, fallbackNoteIndex });
           local = Math.max(local, onset + duration);
         });
-        const measureLength = measure.end - measure.start;
-        if (local < measureLength) events.push({ at: local, xml: restXml(Math.round(measureLength - local), divisions, laneIndex + 1) });
+        if (local < measureLength) spans.push({ rest: true, start: local, end: Math.round(measureLength) });
+        const pieces = spans.flatMap(span => {
+          const spelled = spellSpan(span.start, span.end, starts, values, span.rest);
+          if (!spelled) throw new Error(`Cannot represent ${span.rest ? 'rest ' : ''}duration ${span.end - span.start} at the selected grid.`);
+          return spelled.map((piece, index) => ({ ...piece, span, index, last: index === spelled.length - 1 }));
+        });
+        beamPieces(pieces, starts, measure.meter);
         if (laneIndex > 0) voiceXml.push(`<backup><duration>${Math.round(measureLength)}</duration></backup>`);
-        voiceXml.push(events.map(event => event.xml).join(''));
+        voiceXml.push(pieces.map(piece => pieceXml(piece, measureFifths[measureIndex], measureIndex, partIndex, laneIndex, clefs[partIndex] === 'percussion')).join(''));
       });
       const barline = '<barline location="right"><bar-style>regular</bar-style></barline>';
       return `<measure number="${measureIndex + 1}">${attrs}${directionXml}${voiceXml.join('')}${barline}</measure>`;
@@ -586,7 +723,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
     return { id, name: track.name, xml: `<part id="${id}">${body}</part>`, track };
   });
   const partList = parts.map(part => `<score-part id="${part.id}"><part-name>${xml(part.name)}</part-name></score-part>`).join('');
-  const xmlDoc = `<?xml version="1.0" encoding="UTF-8" standalone="no"?><!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd"><score-partwise version="4.0"><work><work-title>${xml(title || project.title || 'Untitled score')}</work-title></work><identification><encoding><software>SVP Vocal Score</software></encoding></identification><part-list>${partList}</part-list>${parts.map(part => part.xml).join('')}</score-partwise>`;
+  const xmlDoc = `<?xml version="1.0" encoding="UTF-8" standalone="no"?><!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd"><score-partwise version="4.0"><work><work-title>${xml(title || project.title || 'Untitled score')}</work-title></work><identification><encoding><software>织音机</software></encoding></identification><part-list>${partList}</part-list>${parts.map(part => part.xml).join('')}</score-partwise>`;
   const model = {
     divisions,
     measures: measures.map(measure => ({
@@ -595,9 +732,11 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
       end: measure.end,
       meter: { numerator: measure.meter.numerator, denominator: measure.meter.denominator }
     })),
-    tracks: outputTracks.map(track => ({
+    tracks: outputTracks.map((track, index) => ({
       id: track.id,
       name: track.name,
+      clef: clefs[index],
+      percussion: clefs[index] === 'percussion',
       notes: track.lanes.flatMap((lane, laneIndex) => lane.map(note => ({
         start: Math.round(note.start / QUARTER * divisions),
         end: Math.round(note.end / QUARTER * divisions),
@@ -626,8 +765,9 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
     warnings: [...new Set(warnings)],
     stats: { noteCount: outputTracks.reduce((sum, track) => sum + track.lanes.reduce((total, lane) => total + lane.length, 0), 0), measureCount: measures.length, partCount: parts.length },
     parts: parts.map(({ id, name }) => ({ id, name })),
+    keyChanges: keyChanges.map(change => ({ ...change })),
     model,
-    merging: { enabled: Boolean(mergeContinuations), movedNoteCount: mergeResult.movedNoteCount, sourcePartCount, outputPartCount: outputTracks.length, moves: mergeResult.moves, roles },
+    merging: { enabled: merging, movedNoteCount: mergeResult.movedNoteCount, sourcePartCount, outputPartCount: outputTracks.length, moves: mergeResult.moves, roles },
     pitchAdjustments: {
       enabled: pitchAdjustment.enabled,
       thresholdCents: Number(pitchAdjustment.thresholdCents),

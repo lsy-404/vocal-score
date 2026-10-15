@@ -12,7 +12,7 @@ export function pdfTextRectangle(bounds,svgBounds,paper,margin=10){
   };
 }
 
-export function collectScoreTextTargets(pages,{id,project,title,settings}){
+export function collectScoreTextTargets(pages,{id,project,title,settings},margin=10){
   const dimensions=getPaperDimensions(settings.paperSize,settings.orientation);
   return Array.from(pages).flatMap((svg,pageIndex)=>{
     const svgBounds=svg.getBoundingClientRect();
@@ -22,7 +22,7 @@ export function collectScoreTextTargets(pages,{id,project,title,settings}){
       const noteIndex=Number(node.dataset.noteIndex);
       const text=kind==='title'?title:kind==='header'?settings.header:kind==='by'?settings.by:kind==='track-name'?track?.name:kind==='lyric'?track?.notes[noteIndex]?.lyrics:undefined;
       if(typeof text!=='string')return [];
-      const rectangle=pdfTextRectangle(node.getBoundingClientRect(),svgBounds,dimensions);
+      const rectangle=pdfTextRectangle(node.getBoundingClientRect(),svgBounds,dimensions,margin);
       if(!rectangle)return [];
       return [{id:`${pageIndex}:${kind}:${node.dataset.trackId||''}:${node.dataset.noteIndex||''}`,documentId:id,pageNumber:pageIndex+1,kind,text,trackId:track?.id,noteIndex,...rectangle}];
     });

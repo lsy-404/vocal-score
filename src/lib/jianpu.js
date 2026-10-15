@@ -104,8 +104,11 @@ function parseMeasure(measure, divisions, warnings, partName, tonic, minor) {
       const dots = children(item, "dot").length;
       const pitch = rest ? null : parsePitch(item, tonic, minor);
       const sourceMatch = /^svp-n(\d+)-(\d+)-p\d+-v\d+-o\d+-m\d+-s\d+$/u.exec(item.getAttribute('id') || '');
+      const previous = events.at(-1);
       events.push({
-        x: cursor,
+        // Chord members share the onset of the note before them and are stacked above it.
+        x: chord && previous ? previous.x : cursor,
+        chordIndex: chord && previous ? (previous.chordIndex ?? 0) + 1 : 0,
         duration,
         rest,
         type,
@@ -115,6 +118,7 @@ function parseMeasure(measure, divisions, warnings, partName, tonic, minor) {
         sourceTrackIndex: sourceMatch ? Number(sourceMatch[1]) : null,
         sourceNoteIndex: sourceMatch ? Number(sourceMatch[2]) : null,
         ties: [...children(item, "tie"), ...children(child(item, "notations") ?? document.createElement("div"), "tied")].map((tie) => tie.getAttribute("type")),
+        beams: Object.fromEntries(children(item, "beam").map((beam) => [Number(beam.getAttribute("number")), beam.textContent.trim()])),
         chord,
       });
       if (!chord) cursor += duration;
@@ -268,18 +272,21 @@ function drawNote(svg, event, x, y, slotWidth, { fontFamily, lyricFontSize, sour
       el("circle", { cx: centerX, cy: dotY, r: 1.7, class: "jianpu-octave-dot" }, svg);
     }
   }
-  const sustainCount = Math.max(0, Math.floor(event.duration + 0.001) - 1);
+  // Rhythm marks belong to the bottom note of a chord.
+  const sustainCount = event.chord ? 0 : Math.max(0, Math.floor(event.duration + 0.001) - 1);
   for (let i = 0; i < sustainCount; i += 1) {
     text(svg, "-", { x: centerX + 15 + i * 12, y, "text-anchor": "middle", class: "jianpu-sustain" });
   }
-  const beamCount = rhythmLines(event.type);
+  const beamCount = event.chord ? 0 : rhythmLines(event.type);
   const lowOctaveDots = event.pitch?.octaveShift < 0 ? Math.abs(event.pitch.octaveShift) : 0;
   for (let i = 0; i < beamCount; i += 1) {
+    const beam = event.beams?.[i + 1];
+    if (beam && !beam.includes("hook")) continue;
     const rhythmY = y + 15 + lowOctaveDots * 8 + i * 5;
     el("line", { x1: centerX - 6, x2: centerX + 6, y1: rhythmY, y2: rhythmY, class: "jianpu-rhythm" }, svg);
   }
   const fraction = event.duration - Math.floor(event.duration + 0.001);
-  const dotCount = event.duration < 1 ? event.dots : Math.abs(fraction - 0.75) < 0.001 ? 2 : Math.abs(fraction - 0.5) < 0.001 ? 1 : 0;
+  const dotCount = event.chord ? 0 : event.duration < 1 ? event.dots : Math.abs(fraction - 0.75) < 0.001 ? 2 : Math.abs(fraction - 0.5) < 0.001 ? 1 : 0;
   for (let i = 0; i < dotCount; i += 1) el("circle", { cx: centerX + 12 + sustainCount * 12 + i * 5, cy: y - 9, r: 1.7, class: "jianpu-dot" }, svg);
   if (event.lyric) {
     const lyric = text(svg, event.lyric, { x: centerX, y: y + Math.max(40, lyricFontSize + 22), "text-anchor": "middle", class: "jianpu-lyric", "font-family": fontFamily, "font-size": lyricFontSize });
@@ -314,6 +321,23 @@ function packSystems(measures, pageWidth, margin, lyricFontSize) {
   }
   if (current.measures.length) systems.push(current);
   return systems;
+}
+
+// Notes beamed together in the MusicXML share one continuous underline per level.
+function drawBeamedLines(svg, drawn, y) {
+  for (let level = 1; level <= 4; level += 1) {
+    let run = null;
+    for (const item of drawn) {
+      const beam = item.event.beams?.[level];
+      if (beam === "begin") run = [item];
+      else if ((beam === "continue" || beam === "end") && run) run.push(item);
+      if (beam !== "end" || !run) continue;
+      const lowOctaveDots = Math.max(...run.map(({ event }) => (event.pitch?.octaveShift < 0 ? Math.abs(event.pitch.octaveShift) : 0)));
+      const rhythmY = y + 15 + lowOctaveDots * 8 + (level - 1) * 5;
+      el("line", { x1: run[0].x - 6, x2: item.x + 6, y1: rhythmY, y2: rhythmY, class: "jianpu-rhythm" }, svg);
+      run = null;
+    }
+  }
 }
 
 function drawTie(svg, x1, x2, y, octaveShift = 0) {
@@ -403,13 +427,17 @@ export async function renderJianpu(xml, container, {
         for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
           const line = measure.lines[partIndex];
           const y = yTop + voiceOffset + partIndex * partSpacing;
+          const drawn = [];
           for (const event of line.events) {
             const slot = layout.slots.get(event.x) ?? { x: 0, width: 44 };
             const x = x0 + 100 + (slot.x + slot.width / 2) * scale - 4;
             const slotWidth = slot.width * scale;
-            drawNote(svg, event, x, y, slotWidth, { fontFamily, lyricFontSize: safeLyricFontSize, sourceTrackIds });
-            eventPositions.set(event, { x: x + 4, y, system, partIndex });
+            const noteY = y - event.chordIndex * 30;
+            drawNote(svg, event, x, noteY, slotWidth, { fontFamily, lyricFontSize: safeLyricFontSize, sourceTrackIds });
+            eventPositions.set(event, { x: x + 4, y: noteY, system, partIndex });
+            if (!event.chord) drawn.push({ event, x: x + 4 });
           }
+          drawBeamedLines(svg, drawn, y);
         }
       }
     });

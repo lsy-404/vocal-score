@@ -22,6 +22,18 @@ Pinyin Pro 3.29.5
 Source: https://github.com/zh-lx/pinyin-pro
 License: MIT; see PINYIN-LICENSE.txt and BUNDLED-LICENSES.txt.
 
-jsPDF 4.2.1 and PDF.js 6.4.299
-Sources: https://github.com/parallax/jsPDF and https://github.com/mozilla/pdf.js
-Licenses: MIT and Apache-2.0; see JSPDF-LICENSE.txt, PDFJS-LICENSE.txt and BUNDLED-LICENSES.txt.
+jsPDF 4.2.1
+Source: https://github.com/parallax/jsPDF
+License: MIT; see JSPDF-LICENSE.txt and BUNDLED-LICENSES.txt.
+
+fflate 0.8.3, fzstd 0.1.1 and yaml 2.9.1
+Sources: https://github.com/101arrowz/fflate, https://github.com/101arrowz/fzstd and https://github.com/eemeli/yaml
+Licenses: MIT, MIT and ISC; see BUNDLED-LICENSES.txt.
+
+UtaFormatix3
+Source: https://github.com/sdercolin/utaformatix3
+License: Apache-2.0, Copyright 2020 sdercolin; the project-format importers adapt its format handling. See BUNDLED-LICENSES.txt.
+
+LibreSVIP and valuetree-ts
+Sources: https://github.com/SoulMelody/LibreSVIP and https://github.com/sevenc-nanashi/valuetree-ts
+License: MIT; the ACE Studio and DeepVocal importers follow LibreSVIP's description of those formats, and the VoiSona importer follows valuetree-ts. No code from either project is bundled.

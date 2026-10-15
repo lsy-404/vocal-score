@@ -33,7 +33,7 @@ function save(){
 
 <style scoped>
 .score-text-overlay{position:absolute;inset:0;pointer-events:none}
-.score-text-target{position:absolute;pointer-events:auto;padding:0;border:1px solid transparent;border-radius:2px;background:transparent;cursor:text;min-width:8px;min-height:10px}
+.score-text-target{position:absolute;pointer-events:auto;padding:0;border:1px solid transparent;border-radius:2px;background:transparent;box-shadow:none;cursor:text;min-width:8px;min-height:10px}
 .score-text-target:hover,.score-text-target:focus-visible{outline:1px solid var(--fluent-accent,#0078d4);background:rgb(0 120 212 / 10%)}
 .score-text-target:disabled{pointer-events:none}
 .score-text-form{position:absolute;z-index:2;pointer-events:auto;width:clamp(140px,30%,300px);max-width:90%;padding:8px;border:1px solid var(--fluent-accent,#0078d4);border-radius:6px;background:var(--fluent-surface,#fff);box-shadow:0 4px 16px rgb(0 0 0 / 20%)}

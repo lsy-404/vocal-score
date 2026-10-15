@@ -25,7 +25,9 @@ const errorPatterns = [
   [/^Cannot represent duration (.+) at the selected grid\.?$/u, 'svp.error.unsupportedDuration', match => ({duration: match[1]})],
   [/^Cannot represent rest duration (.+) at the selected grid\.?$/u, 'svp.error.unsupportedRest', match => ({duration: match[1]})],
   [/^Unsupported time signature length\.$/u, 'svp.error.timeSignature'],
-  [/^Score exceeds the supported measure limit\.$/u, 'svp.error.measureLimit']
+  [/^Score exceeds the supported measure limit\.$/u, 'svp.error.measureLimit'],
+  [/^Unsupported file type: (.+)$/u, 'import.error.unsupported', match => ({name: match[1]})],
+  [/^Invalid (.+?) (?:project|file)(?:: (.+))?$/u, 'import.error.invalid', match => ({format: match[1], detail: match[2] ?? ''})]
 ];
 
 function messageOf(value) {

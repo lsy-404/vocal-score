@@ -1,6 +1,6 @@
-# SVP 人声谱
+# 织音机
 
-在浏览器本地读取 Synthesizer V 工程，生成带歌词的五线谱与简谱，直接预览和下载 PDF。
+在浏览器本地读取歌声合成、MIDI 与 FL Studio 工程，生成带歌词的五线谱与简谱或器乐总谱，直接预览和下载 PDF。原路径 `projects/vocal-score/` 保持不变。
 
 在仓库根目录使用 Node.js 22.13 或更新版本与 pnpm 10.34.6：
 
@@ -10,9 +10,12 @@ pnpm build
 pnpm check
 ```
 
-单独开发工具界面时，在仓库根目录运行 `pnpm exec vite apps/vocal-score --config apps/vocal-score/vite.config.js`。门户预览服务器通过 `node test/vocal-score/server.js` 启动。工具使用 Vue 单文件组件和 Vue I18n；生产构建会把静态文件集成到 `dist/projects/vocal-score/`，无需后端。运行依赖、字体与 PDF.js worker 随构建包含，不从 CDN 加载。
+单独开发工具界面时，在仓库根目录运行 `pnpm exec vite apps/vocal-score --config apps/vocal-score/vite.config.js`。门户预览服务器通过 `node test/vocal-score/server.js` 启动。工具使用 Vue 单文件组件和 Vue I18n；生产构建会把静态文件集成到 `dist/projects/vocal-score/`，无需后端。运行依赖与字体随构建包含，不从 CDN 加载。
 
 功能：
+
+- 输入格式：Synthesizer V（.svp、.s5p）、ACE Studio（.acep）、VOCALOID（.vsqx、.vpr、.vsq、VOCALOID MIDI）、UTAU（.ust）、OpenUtau（.ustx）、CeVIO（.ccs）、VoiSona（.tssln）、DeepVocal（.dv）、Piapro Studio NT（.ppsf）、MusicXML（.musicxml、.xml、.mxl）、UtaFormatix（.ufdata）、标准 MIDI（.mid）与 FL Studio 12 及以上（.flp）。除 SVP 外均为 Beta，解析器在 `src/lib/importers/`，按需加载。格式处理参考 UtaFormatix3（Apache-2.0），ACE Studio 与 DeepVocal 另参考 LibreSVIP，VoiSona 参考 valuetree-ts。
+- 器乐总谱（MIDI、FL Studio、无歌词 MusicXML）：按乐器名、FL 播放列表轨道名或 MIDI 音色识别乐器，按木管、铜管、打击乐、键盘、人声、弦乐排序；按乐器与音域选高音、中音或低音谱号；同起止的音符写成和弦；General MIDI 鼓写在打击乐谱表上；器乐工程不做“合并分散独唱”。FL Studio 只读取第一个编排，静音的通道与轨道仍导入并给出提示。
 
 - 多文件导入、声部选择、调号、移调和节奏网格。
 - 首次打开为空白。文件原始内容、修改后的歌词及每份文件的转换、排版和纸张设置保存在当前浏览器的 IndexedDB，可移除；清除浏览器数据也会删除这些内容。
@@ -24,12 +27,17 @@ pnpm check
 - 可逐音符修改或清空歌词并还原；单独的 `-`、`+` 延长前一个字。粘贴拼音或中文后预览替换，可将汉字转为拼音或以汉字替换拼音，数量匹配后应用，支持撤销。
 - 可直接点选谱面上的标题、页眉、署名、声部名或歌词进行编辑；也可按拼音匹配现有歌词补入汉字，显示匹配位置并处理多音字歧义。
 - 识别音分与音高曲线，达到阈值时按代表偏移修正半音，显示修正前后及残余音分。动态曲线采用中段采样，非线性曲线为近似；滑音、颤音参数作为参数展示。
-- 字体、歌词/标题/页眉字号、每页页眉、首页 by 署名、页码、小节号。
-- PDF.js 连续页面预览与直接下载 PDF，支持 A4、Letter、Legal、A3、A5 和横竖方向；也可导出 MusicXML 与谱面 SVG。
+- 按拍拼写节奏：拍内用单一时值（含附点），跨拍用连音线，半小节内的切分四分音符保持完整；八分与更短音符按拍连杠，4/4 等偶数拍中纯八分音符按半小节连杠，复合拍按附点四分分组；简谱减时线随连杠相连。
+- 识别转调（可关闭）：按小节音级匹配调号集合，持续的转调写入新调号，零星临时记号保持为临时记号。
+- 速度标记取整，同一位置的成对速度点只保留一个，连续小幅渐变合并为 rit./accel. 与终点速度。
+- 字体、歌词/标题/页眉字号、每页页眉、首页 by 署名、页码、小节号、页边距（0–30 mm，预览与 PDF 一致）。
+- 按纸张连续预览排版页面并直接下载 PDF，支持 A4、Letter、Legal、A3、A5 和横竖方向；也可导出 MusicXML 与谱面 SVG。
 - 使用 Platform Kit Fluent 的样式包，支持浅色和深色外观。
 
-五线谱支持同轨复音；简谱暂要求每个输出声部内没有重叠音符。转换不生成歌声音频，也不修改磁盘上的原始工程。连续 PDF 预览使用 144 DPI 页面图像，下载时按 220 DPI 重新生成；PDF 内文字不可搜索，需要可编辑或矢量内容时可导出 MusicXML 或 SVG。所有工程、原始文件副本和设置仅保存在当前浏览器，不会上传到服务器。
+五线谱支持同轨复音；简谱暂要求每个输出声部内没有重叠音符。转换不生成歌声音频，也不修改磁盘上的原始工程。预览直接显示矢量谱面，页边与缩放和 PDF 一致；下载时按 220 DPI 生成 PDF 页面图像，PDF 内文字不可搜索，需要可编辑或矢量内容时可导出 MusicXML 或 SVG。所有工程、原始文件副本和设置仅保存在当前浏览器，不会上传到服务器。
 
-完整验证：`pnpm check`。设置 `SVP_SAMPLE_FILES` 为以分号分隔的本地 `.svp` 文件路径可增加真实工程转换验证。浏览器回归脚本位于仓库根目录 `test/vocal-score/`，通过外部安装的 Playwright 执行；使用 `PLAYWRIGHT_MODULE` 指定 Playwright 模块，使用 `PREVIEW_URL` 指向已构建门户中的 `/projects/vocal-score/` 页面。
+完整验证：`pnpm check`。设置 `SVP_SAMPLE_FILES` 为以分号分隔的本地 `.svp` 文件路径可增加真实工程转换验证。`test/vocal-score/formats.browser.mjs` 在浏览器里导入各格式，`FORMAT_SAMPLE_FILES`（分号分隔，任意支持格式）可加入本地真实工程；`FLP_SAMPLE_DIR` 指定 FL Studio 样本目录。样本只在本地读取，不进入仓库。浏览器回归脚本位于仓库根目录 `test/vocal-score/`，通过外部安装的 Playwright 执行；使用 `PLAYWRIGHT_MODULE` 指定 Playwright 模块，使用 `PREVIEW_URL` 指向已构建门户中的 `/projects/vocal-score/` 页面。
+
+致谢：感谢奥莉安多提供的样本数据和改善建议。
 
 第三方许可位于 `public/vendor/`，构建后也包含在 `dist/vendor/`。原始用户工程和生成的歌曲文件不进入源代码或部署资源。

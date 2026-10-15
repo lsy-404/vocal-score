@@ -86,6 +86,7 @@ export async function createPdf(svgPages, {
   orientation = 'portrait',
   title = '',
   dpi = 220,
+  margin = PAGE_MARGIN_MM,
   signal,
 } = {}) {
   const pages = Array.from(svgPages ?? []);
@@ -106,8 +107,9 @@ export async function createPdf(svgPages, {
   const abort=()=>{worker.terminate();rejectResult(signal.reason);};
   signal?.addEventListener('abort',abort,{once:true});
   worker.postMessage({type:'start',dimensions,orientation,title});
-  const printableWidth = dimensions.width - PAGE_MARGIN_MM * 2;
-  const printableHeight = dimensions.height - PAGE_MARGIN_MM * 2;
+  if (!Number.isFinite(margin) || margin < 0 || margin * 2 >= Math.min(dimensions.width, dimensions.height)) throw new RangeError('Page margin must leave a printable area.');
+  const printableWidth = dimensions.width - margin * 2;
+  const printableHeight = dimensions.height - margin * 2;
   const canvasWidth = Math.ceil(printableWidth * dpi / 25.4);
   const canvasHeight = Math.ceil(printableHeight * dpi / 25.4);
 
@@ -130,7 +132,7 @@ export async function createPdf(svgPages, {
       const blob=await new Promise((resolve,reject)=>canvas.toBlob(value=>value?resolve(value):reject(new Error('Unable to encode a PDF page.')),'image/png'));
       const bytes=await blob.arrayBuffer();
       signal?.throwIfAborted();
-      worker.postMessage({type:'page',index,bytes,margin:PAGE_MARGIN_MM},[bytes]);
+      worker.postMessage({type:'page',index,bytes,margin},[bytes]);
     } finally {
       URL.revokeObjectURL(objectUrl);
       image.removeAttribute('src');
