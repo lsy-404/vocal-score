@@ -1,36 +1,78 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { t } from '../i18n.js';
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
-const props = defineProps({ bytes: { type: Uint8Array, default: null } });
+const props = defineProps({
+  bytes: { type: Uint8Array, default: null },
+  textTargets: { type: Array, default: () => [] },
+});
 const emit = defineEmits(['ready', 'error']);
-const canvasElement = ref(null);
 const viewportElement = ref(null);
+const pageElements = ref([]);
+const pageSlots = shallowRef([]);
 const pageNumber = ref(1);
+const pageInput = ref(1);
 const totalPages = ref(0);
 const zoom = ref('width');
+const layout = ref({ width: 1, height: 1 });
 const loading = ref(false);
 const failed = ref(false);
 
 let loadingTask = null;
 let pdfDocument = null;
-let renderTask = null;
-let renderGeneration = 0;
 let documentGeneration = 0;
-let renderQueue = Promise.resolve();
 let resizeObserver = null;
+let resizeFrame = 0;
+let scrollFrame = 0;
+const PAGE_GAP = 10;
+const nearbyPages = new Set();
 
 const pageLabel = computed(() => t('第 {page} 页，共 {total} 页', { page: pageNumber.value, total: totalPages.value }));
 
+function getSlot(number) {
+  return pageSlots.value[number - 1];
+}
+
+function clearPageWindow() {
+  nearbyPages.clear();
+}
+
+function clearSlotCanvas(slot) {
+  const canvas = slot?.element?.querySelector('canvas')
+    || viewportElement.value?.querySelector(`[data-page-number="${slot?.number}"] canvas`);
+  if (!canvas) return;
+  canvas.width = 0;
+  canvas.height = 0;
+  canvas.style.removeProperty('width');
+  canvas.style.removeProperty('height');
+  delete canvas.dataset.rendered;
+}
+
+async function cancelSlot(slot, clear = true) {
+  if (!slot) return;
+  slot.generation += 1;
+  slot.task?.cancel();
+  const previous = slot.renderPromise;
+  if (clear) clearSlotCanvas(slot);
+  slot.renderedScale = null;
+  try { await previous; } catch {}
+  slot.task = null;
+  if (slot.renderPromise === previous) slot.renderPromise = null;
+  slot.requestedScale = null;
+  if (nearbyPages.has(slot.number) && pdfDocument) renderSlot(slot);
+}
+
 async function releaseDocument() {
-  renderGeneration += 1;
-  renderTask?.cancel();
-  await renderQueue.catch(() => {});
-  renderTask = null;
+  clearPageWindow();
+  await Promise.all(pageSlots.value.map((slot) => cancelSlot(slot)));
+  pageSlots.value = [];
+  pageElements.value = [];
+  layout.value = { width: 1, height: 1 };
+  totalPages.value = 0;
   const oldLoadingTask = loadingTask;
   const oldDocument = pdfDocument;
   loadingTask = null;
@@ -42,69 +84,135 @@ async function releaseDocument() {
   }
 }
 
-async function renderPage(generation) {
-  const documentProxy = pdfDocument;
-  const canvas = canvasElement.value;
-  const viewportElementValue = viewportElement.value;
-  if (generation !== renderGeneration || !documentProxy || !canvas || !viewportElementValue) return;
-  const page = await documentProxy.getPage(pageNumber.value);
-  if (generation !== renderGeneration || documentProxy !== pdfDocument) return;
+function calculateLayout() {
+  if (!pdfDocument || !viewportElement.value || !pageSlots.value.length) return;
+  const availableWidth = Math.max(1, viewportElement.value.clientWidth - 24);
+  const availableHeight = Math.max(1, viewportElement.value.clientHeight - 24);
+  const widthScale = availableWidth / pageSlots.value[0].baseWidth;
+  const scale = zoom.value === 'width' ? widthScale : zoom.value === 'fit'
+    ? Math.min(widthScale, availableHeight / pageSlots.value[0].baseHeight)
+    : Number(zoom.value);
+  layout.value = {
+    width: pageSlots.value[0].baseWidth * scale,
+    height: pageSlots.value[0].baseHeight * scale,
+  };
+}
 
-  const baseViewport = page.getViewport({ scale: 1 });
-  const availableWidth = Math.max(1, viewportElementValue.clientWidth - 32);
-  const availableHeight = Math.max(1, viewportElementValue.clientHeight - 32);
-  const scale = zoom.value === 'width' ? availableWidth / baseViewport.width : zoom.value === 'fit'
-    ? Math.min(availableWidth / baseViewport.width, availableHeight / baseViewport.height) : Number(zoom.value);
-  const viewport = page.getViewport({ scale });
-  const pixelRatio = Math.max(1, globalThis.devicePixelRatio || 1);
-  const context = canvas.getContext('2d', { alpha: false });
-  if (!context) throw new Error('Canvas rendering is unavailable.');
-  canvas.width = Math.ceil(viewport.width * pixelRatio);
-  canvas.height = Math.ceil(viewport.height * pixelRatio);
-  canvas.dataset.rendered='false';
-  canvas.style.width = `${Math.ceil(viewport.width)}px`;
-  canvas.style.height = `${Math.ceil(viewport.height)}px`;
-  const task = page.render({
-    canvasContext: context,
-    viewport,
-    transform: pixelRatio === 1 ? null : [pixelRatio, 0, 0, pixelRatio, 0, 0],
-  });
-  renderTask = task;
+function pageStyle() {
+  return { width: `${layout.value.width}px`, height: `${layout.value.height}px` };
+}
+
+function targetsForPage(number) {
+  return props.textTargets.filter((target) => target.pageIndex === number - 1);
+}
+
+async function renderSlot(slot) {
+  const scale = layout.value.width / slot.baseWidth;
+  if (slot.renderPromise && slot.requestedScale === scale) return;
+  if (slot.renderedScale === scale && slot.element?.querySelector('canvas')?.dataset.rendered === 'true') return;
+  const generation = ++slot.generation;
+  slot.task?.cancel();
+  const previous = slot.renderPromise;
+  if (previous) {
+    try { await previous; } catch {}
+  }
+  if (generation !== slot.generation || !nearbyPages.has(slot.number) || !pdfDocument) return;
+
+  const target = slot.element;
+  const canvas = target?.querySelector('canvas');
+  if (!canvas) return;
+  slot.requestedScale = scale;
+
+  const documentProxy = pdfDocument;
+  const promise = (async () => {
+    const page = await documentProxy.getPage(slot.number);
+    if (generation !== slot.generation || documentProxy !== pdfDocument || !nearbyPages.has(slot.number)) {
+      page.cleanup();
+      return;
+    }
+    const viewport = page.getViewport({ scale });
+    const pixelRatio = Math.min(2, Math.max(1, globalThis.devicePixelRatio || 1));
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context) throw new Error('Canvas rendering is unavailable.');
+    canvas.width = Math.ceil(viewport.width * pixelRatio);
+    canvas.height = Math.ceil(viewport.height * pixelRatio);
+    canvas.style.width = `${viewport.width}px`;
+    canvas.style.height = `${viewport.height}px`;
+    canvas.dataset.rendered = 'false';
+    const task = page.render({
+      canvasContext: context,
+      viewport,
+      transform: pixelRatio === 1 ? null : [pixelRatio, 0, 0, pixelRatio, 0, 0],
+    });
+    slot.task = task;
+    try {
+      await task.promise;
+      if (generation === slot.generation && documentProxy === pdfDocument) {
+        canvas.dataset.rendered = 'true';
+        slot.renderedScale = scale;
+      }
+    } finally {
+      if (slot.task === task) slot.task = null;
+      page.cleanup();
+    }
+  })();
+  slot.renderPromise = promise;
   try {
-    await task.promise;
-    if(generation===renderGeneration)canvas.dataset.rendered='true';
+    await promise;
   } catch (error) {
-    if (generation === renderGeneration && error?.name !== 'RenderingCancelledException') {
+    if (generation === slot.generation && error?.name !== 'RenderingCancelledException') {
       failed.value = true;
       emit('error', error);
     }
   } finally {
-    if (renderTask === task) renderTask = null;
-    page.cleanup();
+    if (slot.renderPromise === promise) slot.renderPromise = null;
   }
 }
 
-function scheduleRender() {
-  if (!pdfDocument) return;
-  const generation = ++renderGeneration;
-  renderTask?.cancel();
-  renderQueue = renderQueue.catch(() => {}).then(() => renderPage(generation)).catch(error => {
-    if (generation === renderGeneration && error?.name !== 'RenderingCancelledException') {
-      failed.value = true;
-      emit('error', error);
+function setCurrentPage(number) {
+  if (number < 1 || number > totalPages.value || number === pageNumber.value) return;
+  pageNumber.value = number;
+  if (document.activeElement !== document.querySelector('.pdf-viewer__page-input')) pageInput.value = number;
+}
+
+function updatePageWindow() {
+  const viewport = viewportElement.value;
+  const firstPage = pageElements.value[0];
+  if (!viewport || !firstPage || !pdfDocument || !pageSlots.value.length) return;
+  const rootTop = viewport.getBoundingClientRect().top;
+  const firstTop = firstPage.getBoundingClientRect().top - rootTop + viewport.scrollTop;
+  const pageStep = layout.value.height + PAGE_GAP;
+  const margin = Math.max(viewport.clientHeight, 500);
+  const firstVisible = Math.max(0, Math.floor((viewport.scrollTop - margin - firstTop) / pageStep));
+  const lastVisible = Math.min(pageSlots.value.length - 1, Math.ceil((viewport.scrollTop + viewport.clientHeight + margin - firstTop) / pageStep));
+  const nextNearby = new Set();
+  for (let index = firstVisible; index <= lastVisible; index += 1) nextNearby.add(index + 1);
+  for (const number of nearbyPages) {
+    if (!nextNearby.has(number)) {
+      nearbyPages.delete(number);
+      const slot = getSlot(number);
+      cancelSlot(slot);
+      clearSlotCanvas(slot);
     }
-  });
+  }
+  for (const number of nextNearby) {
+    nearbyPages.add(number);
+    renderSlot(getSlot(number));
+  }
+
+  const center = viewport.scrollTop + viewport.clientHeight / 2;
+  const currentIndex = Math.round((center - firstTop) / pageStep);
+  setCurrentPage(Math.min(pageSlots.value.length, Math.max(1, currentIndex + 1)));
 }
 
 async function loadPdf(bytes) {
-  if(canvasElement.value)canvasElement.value.dataset.rendered='false';
   const generation = ++documentGeneration;
   loading.value = bytes instanceof Uint8Array && bytes.byteLength > 0;
+  failed.value = false;
   await releaseDocument();
   if (generation !== documentGeneration) return;
-  failed.value = false;
   pageNumber.value = 1;
-  totalPages.value = 0;
+  pageInput.value = 1;
   if (!(bytes instanceof Uint8Array) || !bytes.byteLength) {
     loading.value = false;
     return;
@@ -119,10 +227,26 @@ async function loadPdf(bytes) {
       return;
     }
     pdfDocument = documentProxy;
+    const firstPage = await documentProxy.getPage(1);
+    const firstViewport = firstPage.getViewport({ scale: 1 });
+    firstPage.cleanup();
+    pageSlots.value = Array.from({ length: documentProxy.numPages }, (_, index) => ({
+      number: index + 1,
+      baseWidth: firstViewport.width,
+      baseHeight: firstViewport.height,
+      element: null,
+      task: null,
+      renderPromise: null,
+      generation: 0,
+      renderedScale: null,
+    }));
     totalPages.value = documentProxy.numPages;
+    calculateLayout();
     loading.value = false;
+    await nextTick();
+    if (generation !== documentGeneration || documentProxy !== pdfDocument) return;
+    updatePageWindow();
     emit('ready', { pages: documentProxy.numPages });
-    scheduleRender();
   } catch (error) {
     if (generation === documentGeneration) {
       loading.value = false;
@@ -132,27 +256,62 @@ async function loadPdf(bytes) {
   }
 }
 
+function bindPageElement(element, slot) {
+  if (element) {
+    slot.element = element;
+    element.dataset.pageNumber = String(slot.number);
+    pageElements.value[slot.number - 1] = element;
+  } else {
+    slot.element = null;
+    pageElements.value[slot.number - 1] = null;
+  }
+}
+
+function navigateToPage() {
+  const requested = Math.min(totalPages.value, Math.max(1, Math.trunc(Number(pageInput.value) || 1)));
+  pageInput.value = requested;
+  setCurrentPage(requested);
+  pageElements.value[requested - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 function previousPage() {
-  if (pageNumber.value <= 1) return;
-  pageNumber.value -= 1;
-  scheduleRender();
+  pageInput.value = Math.max(1, pageNumber.value - 1);
+  navigateToPage();
 }
 
 function nextPage() {
-  if (pageNumber.value >= totalPages.value) return;
-  pageNumber.value += 1;
-  scheduleRender();
+  pageInput.value = Math.min(totalPages.value, pageNumber.value + 1);
+  navigateToPage();
+}
+
+function onResize() {
+  cancelAnimationFrame(resizeFrame);
+  resizeFrame = requestAnimationFrame(async () => {
+    calculateLayout();
+    await nextTick();
+    updatePageWindow();
+  });
+}
+
+function onScroll() {
+  cancelAnimationFrame(scrollFrame);
+  scrollFrame = requestAnimationFrame(updatePageWindow);
 }
 
 watch(() => props.bytes, loadPdf, { immediate: true, flush: 'post' });
+watch(zoom, onResize);
 
 onMounted(() => {
-  resizeObserver = new ResizeObserver(scheduleRender);
+  viewportElement.value?.addEventListener('scroll', onScroll, { passive: true });
+  resizeObserver = new ResizeObserver(onResize);
   if (viewportElement.value) resizeObserver.observe(viewportElement.value);
 });
 
 onBeforeUnmount(async () => {
   documentGeneration += 1;
+  cancelAnimationFrame(resizeFrame);
+  cancelAnimationFrame(scrollFrame);
+  viewportElement.value?.removeEventListener('scroll', onScroll);
   resizeObserver?.disconnect();
   await releaseDocument();
 });
@@ -163,10 +322,13 @@ onBeforeUnmount(async () => {
     <header class="pdf-viewer__toolbar">
       <div class="pdf-viewer__navigation">
         <button class="fluent-button" type="button" :disabled="pageNumber <= 1 || loading" :aria-label="t('上一页')" @click="previousPage">‹</button>
-        <span class="pdf-viewer__page-count" aria-live="polite">{{ pageLabel }}</span>
+        <label class="pdf-viewer__page-control">
+          <span class="pdf-viewer__page-count" aria-live="polite">{{ pageLabel }}</span>
+          <input v-model.number="pageInput" class="fluent-field__input pdf-viewer__page-input" type="number" min="1" :max="totalPages || 1" :disabled="loading || !totalPages" :aria-label="t('页码')" @change="navigateToPage" @keydown.enter.prevent="navigateToPage">
+        </label>
         <button class="fluent-button" type="button" :disabled="pageNumber >= totalPages || loading" :aria-label="t('下一页')" @click="nextPage">›</button>
       </div>
-      <select v-model="zoom" class="fluent-select__control pdf-viewer__zoom" :aria-label="t('PDF 缩放')" @change="scheduleRender">
+      <select v-model="zoom" class="fluent-select__control pdf-viewer__zoom" :aria-label="t('PDF 缩放')">
         <option value="width">{{ t('适合页宽') }}</option>
         <option value="fit">{{ t('适合页面') }}</option>
         <option value="0.75">75%</option>
@@ -177,7 +339,14 @@ onBeforeUnmount(async () => {
     <div ref="viewportElement" class="pdf-viewer__viewport">
       <p v-if="loading" class="pdf-viewer__message">{{ t('正在加载 PDF…') }}</p>
       <p v-else-if="failed" class="pdf-viewer__message pdf-viewer__message--error">{{ t('PDF 渲染失败') }}</p>
-      <canvas v-show="!loading && !failed && totalPages" ref="canvasElement" class="pdf-viewer__canvas" />
+      <div v-else-if="totalPages" class="pdf-viewer__pages">
+        <article v-for="slot in pageSlots" :key="slot.number" :ref="element => bindPageElement(element, slot)" class="pdf-viewer__page" :data-page-number="slot.number" :style="pageStyle()" :aria-label="t('第 {page} 页，共 {total} 页', { page: slot.number, total: totalPages })">
+          <canvas class="pdf-viewer__canvas" />
+          <div class="pdf-viewer__page-overlay">
+            <slot name="page-overlay" :page-number="slot.number" :width="layout.width" :height="layout.height" :text-targets="targetsForPage(slot.number)" />
+          </div>
+        </article>
+      </div>
     </div>
   </section>
 </template>
@@ -213,11 +382,29 @@ onBeforeUnmount(async () => {
   gap: 8px;
 }
 
+.pdf-viewer__page-control {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
 .pdf-viewer__page-count {
   min-width: 9em;
   text-align: center;
   font-size: 0.875rem;
   font-variant-numeric: tabular-nums;
+}
+
+.pdf-viewer__page-input {
+  width: 58px;
+  padding-inline: 5px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.pdf-viewer__page-input::-webkit-inner-spin-button,
+.pdf-viewer__page-input::-webkit-outer-spin-button {
+  margin: 0;
 }
 
 .pdf-viewer__zoom {
@@ -226,27 +413,49 @@ onBeforeUnmount(async () => {
 }
 
 .pdf-viewer__viewport {
-  display: flex;
   min-height: 0;
   flex: 1;
-  align-items: flex-start;
-  justify-content: center;
   overflow: auto;
-  padding: 16px;
+  padding: 12px;
   background: var(--fluent-bg, #f4f5f6);
+  overscroll-behavior: contain;
 }
 
-.pdf-viewer__canvas {
-  display: block;
+.pdf-viewer__pages {
+  display: flex;
+  min-width: 100%;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.pdf-viewer__page {
+  position: relative;
   flex: 0 0 auto;
-  max-width: none;
   background: #fff;
   box-shadow: 0 2px 12px rgb(0 0 0 / 16%);
 }
 
+.pdf-viewer__canvas {
+  display: block;
+  max-width: none;
+}
+
+.pdf-viewer__page-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.pdf-viewer__page-overlay :deep(*) {
+  pointer-events: auto;
+}
+
 .pdf-viewer__message {
-  align-self: center;
-  margin: auto;
+  display: grid;
+  min-height: 100%;
+  margin: 0;
+  place-items: center;
   color: var(--fluent-muted, #616161);
 }
 
@@ -254,15 +463,27 @@ onBeforeUnmount(async () => {
   color: var(--fluent-error, #b10e1c);
 }
 
-@media (max-width: 420px) {
+@media (max-width: 560px) {
   .pdf-viewer__toolbar {
     gap: 6px;
     padding-inline: 6px;
   }
 
+  .pdf-viewer__navigation {
+    gap: 4px;
+  }
+
+  .pdf-viewer__page-control {
+    gap: 3px;
+  }
+
   .pdf-viewer__page-count {
     min-width: 7em;
     font-size: 0.75rem;
+  }
+
+  .pdf-viewer__page-input {
+    width: 46px;
   }
 
   .pdf-viewer__zoom {
