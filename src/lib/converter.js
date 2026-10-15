@@ -397,6 +397,30 @@ function lyricXml(lyrics, mode) {
   return `<lyric>${syllabic ? `<syllabic>${syllabic}</syllabic>` : ''}<text>${xml(text)}</text>${mode === 'start' ? '<extend type="start"/>' : ''}</lyric>`;
 }
 
+// Notes that do not overlap in the source must not overlap once snapped to the grid, or a very short note lands on its
+// neighbour and shows up as a second voice. An overlapping note is trimmed; two notes on the same grid position become
+// one, keeping the earlier note's syllable and the longer note's pitch.
+function separateSnapped(notes) {
+  const kept = [];
+  let count = 0;
+  const syllable = note => { const lyrics = String(note.lyrics ?? '').trim(); return lyrics && lyrics !== '-' && lyrics !== '+' && !lyrics.startsWith('.'); };
+  for (const note of notes) {
+    const previous = kept.at(-1);
+    if (!previous || note.start >= previous.end || previous.sourceEnd > Number(note.onset)) { kept.push({ ...note }); continue; }
+    count += 1;
+    if (note.start > previous.start) {
+      previous.end = note.start;
+      previous.duration = previous.end - previous.start;
+      kept.push({ ...note });
+      continue;
+    }
+    const longer = note.sourceEnd - Number(note.onset) > previous.sourceEnd - Number(previous.onset) ? note : previous;
+    const lyrics = syllable(previous) || !syllable(note) ? previous.lyrics : note.lyrics;
+    kept[kept.length - 1] = { ...longer, start: previous.start, end: Math.max(previous.end, note.end), duration: Math.max(previous.end, note.end) - previous.start, lyrics };
+  }
+  return { notes: kept, count };
+}
+
 // How readily a note that only continues the previous syllable is folded into it. A continuation is a "-"/"+" lyric
 // or, from medium up, the previous syllable's vowel sung again ("zou" then "ou"). Low joins "-" notes of the same
 // pitch; medium also folds repeated vowels (joined at the same pitch, drawn as a melisma otherwise) and bridges one
@@ -593,7 +617,7 @@ function overlapRatio(notes, signal) {
   return Math.min(1, covered / total);
 }
 
-export function createScore(project, { trackIds, grid = 16, transpose = 0, fifths = 0, title, mergeContinuations = false, modulation = false, noteMerge = 'none', pitchAdjustment = { enabled: true, thresholdCents: 50 } } = {}) {
+export function createScore(project, { trackIds, grid = 16, transpose = 0, fifths = 0, title, mergeContinuations = false, modulation = false, noteMerge = 'none', preserveOrder = false, pitchAdjustment = { enabled: true, thresholdCents: 50 } } = {}) {
   if (!project || !Array.isArray(project.tracks)) throw new TypeError('Project must contain parsed tracks.');
   if (![4, 8, 16, 32].includes(grid)) throw new RangeError('Grid must be 4, 8, 16, or 32.');
   if (trackIds !== undefined && !Array.isArray(trackIds)) throw new TypeError('Track IDs must be an array.');
@@ -605,7 +629,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
   if (!chosen.length) throw new Error('Select at least one vocal track.');
   // Instrumental sources are laid out in score order (woodwinds, brass, percussion, keyboards, voices, strings) and never merged.
   const instrumental = chosen.some(track => track.instrument);
-  const selected = instrumental ? [...chosen].sort((a, b) => (a.instrument?.order ?? 80) - (b.instrument?.order ?? 80)) : chosen;
+  const selected = instrumental && !preserveOrder ? [...chosen].sort((a, b) => (a.instrument?.order ?? 80) - (b.instrument?.order ?? 80)) : chosen;
   const merging = mergeContinuations && !instrumental;
   const warnings = [...(project.warnings || [])];
   const divisions = grid;
@@ -646,13 +670,15 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
         adjustmentSemitones,
         residualCents: representativeCents - adjustmentSemitones * 100
       };
-      if (normalizedTuning.curveApproximate && normalizedTuning.curvePointCount) warnings.push(`${track.name}: ${normalizedTuning.curveMode || 'unknown'} pitch curve uses a linear sampling approximation for note adjustment.`);
-      else if (normalizedTuning.curvePointCount) warnings.push(`${track.name}: pitch curve shape is reduced to one representative value per note for score display.`);
-      if (normalizedTuning.residualCents) warnings.push(`${track.name}: remaining ${normalizedTuning.residualCents} cent tuning deviation is preserved as metadata, not engraved.`);
-      return { ...note, start, duration: end - start, pitch, end, tuning: normalizedTuning, sourceOrder, sourceNoteIndex: note.sourceNoteIndex ?? sourceOrder, sourceTrackIndex: sourceIndex, sourceTrackId: track.id, sourceTrackName: track.name };
+      if (pitchAdjustment.enabled && normalizedTuning.curveApproximate && normalizedTuning.curvePointCount) warnings.push(`${track.name}: ${normalizedTuning.curveMode || 'unknown'} pitch curve uses a linear sampling approximation for note adjustment.`);
+      else if (pitchAdjustment.enabled && normalizedTuning.curvePointCount) warnings.push(`${track.name}: pitch curve shape is reduced to one representative value per note for score display.`);
+      if (pitchAdjustment.enabled && normalizedTuning.residualCents) warnings.push(`${track.name}: remaining ${normalizedTuning.residualCents} cent tuning deviation is preserved as metadata, not engraved.`);
+      return { ...note, start, duration: end - start, pitch, end, sourceEnd: originalEnd, tuning: normalizedTuning, sourceOrder, sourceNoteIndex: note.sourceNoteIndex ?? sourceOrder, sourceTrackIndex: sourceIndex, sourceTrackId: track.id, sourceTrackName: track.name };
     }).sort((a, b) => a.start - b.start || a.sourceOrder - b.sourceOrder);
     if (shifted) warnings.push(`${track.name}: ${shifted} note(s) shifted by grid quantization.`);
-    const merged = mergeConsecutive(notes, noteMerge, step);
+    const snapped = separateSnapped(notes);
+    if (snapped.count) warnings.push(`${track.name}: ${snapped.count} very short note(s) merged into a neighbour at this rhythm grid.`);
+    const merged = mergeConsecutive(snapped.notes, noteMerge, step);
     mergedNoteCount += merged.count;
     const lanes = partitionVoices(merged.notes, step).map(lane => lane.map((note, index) => {
       const next = lane[index + 1];

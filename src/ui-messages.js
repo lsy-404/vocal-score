@@ -9,6 +9,7 @@ const warningPatterns = [
   [/^(.+): pitch curve shape is reduced to one representative value per note for score display\.$/u, 'svp.warning.representativeCurve', match => ({track: match[1]})],
   [/^(.+): remaining (-?\d+(?:\.\d+)?) cent tuning deviation is preserved as metadata, not engraved\.$/u, 'svp.warning.residual', match => ({track: match[1], cents: match[2]})],
   [/^(.+): (\d+) note\(s\) shifted by grid quantization\.$/u, 'svp.warning.quantized', match => ({track: match[1], count: match[2]})],
+  [/^(.+): (\d+) very short note\(s\) merged into a neighbour at this rhythm grid\.$/u, 'svp.warning.snapped', match => ({track: match[1], count: match[2]})],
   [/^(.+): overlapping notes are rendered as (\d+) voices\.$/u, 'svp.warning.overlap', match => ({track: match[1], count: match[2]})],
   [/^(.+): pitch (-?\d+(?:\.\d+)?) is outside the supported MIDI range 0–127 or uses fractional semitones\.$/u, 'svp.warning.midiRange', match => ({track: match[1], pitch: match[2]})],
   [/^(.+): MusicXML backup timing indicates multiple voices in one part, which numbered-score rendering does not support\.$/u, 'svp.warning.multivoiceJianpu', match => ({track: match[1]})]

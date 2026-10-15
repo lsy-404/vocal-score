@@ -164,7 +164,11 @@ function choosePhrase(index, value) {
 }
 
 function phrasePairs(phrase) {
-  return phrase.candidates[phrase.chosen].map((noteIndex, index) => `${notes.value[noteIndex]?.lyrics || t('lyricEditor.empty')}→${phrase.tokens[index].value}`).join(' · ');
+  return phrase.candidates[phrase.chosen].map((noteIndex, index) => noteIndex < 0 ? `${phrase.tokens[index].value}→${t('lyricEditor.noNote')}` : `${notes.value[noteIndex]?.lyrics || t('lyricEditor.empty')}→${phrase.tokens[index].value}`).join(' · ');
+}
+
+function firstNote(candidate) {
+  return notes.value[candidate.find(noteIndex => noteIndex >= 0)];
 }
 
 function applyReplacement() {
@@ -226,8 +230,8 @@ function undoReplacement() {
         <p class="lyric-editor__counts" :class="{'is-mismatch': strategy==='none'}">{{ countStatus }}</p>
         <template v-if="strategy==='located'">
           <div v-for="(phrase,index) in located.slice(0,8)" :key="index" class="lyric-editor__phrase" :class="{'is-extra': phrase.chosen<0}">
-            <span>「{{ phrase.text }}」 → {{ phrase.chosen>=0 ? positionLabel(notes[phrase.candidates[phrase.chosen][0]].onset) : t('lyricEditor.notFound') }}</span>
-            <select v-if="phrase.candidates.length>1" class="fluent-select__control" :value="phrase.chosen" :aria-label="t('lyricEditor.chooseMatch')" @change="choosePhrase(index,$event.target.value)"><option v-for="(candidate,position) in phrase.candidates" :key="position" :value="position">{{ t('lyricEditor.occurrence',{index:position+1,count:phrase.candidates.length}) }} · {{ positionLabel(notes[candidate[0]].onset) }}</option></select>
+            <span>「{{ phrase.text }}」 → {{ phrase.chosen>=0 ? positionLabel(firstNote(phrase.candidates[phrase.chosen]).onset) : t('lyricEditor.notFound') }}<em v-if="phrase.chosen>=0&&phrase.mismatches[phrase.chosen]" class="lyric-editor__approximate">{{ t('lyricEditor.approximate',{count:phrase.mismatches[phrase.chosen]}) }}</em></span>
+            <select v-if="phrase.candidates.length>1" class="fluent-select__control" :value="phrase.chosen" :aria-label="t('lyricEditor.chooseMatch')" @change="choosePhrase(index,$event.target.value)"><option v-for="(candidate,position) in phrase.candidates" :key="position" :value="position">{{ t('lyricEditor.occurrence',{index:position+1,count:phrase.candidates.length}) }} · {{ positionLabel(firstNote(candidate).onset) }}</option></select>
             <small v-if="phrase.chosen>=0">{{ phrasePairs(phrase) }}</small>
           </div>
           <small v-if="located.length>8" class="lyric-editor__more">{{ t('lyricEditor.previewMore', {count: 8, total: located.length}) }}</small>
@@ -291,6 +295,7 @@ function undoReplacement() {
 .lyric-editor__pair{padding:3px 0;color:var(--fluent-text,rgb(27 27 27));font-size:11px;overflow-wrap:anywhere}
 .lyric-editor__phrase{display:grid;gap:4px;padding:6px 0;border-bottom:1px solid var(--fluent-border,rgb(229 229 229));font-size:11px;overflow-wrap:anywhere}
 .lyric-editor__phrase select{min-height:28px;font-size:11px}
+.lyric-editor__approximate{margin-left:6px;color:var(--fluent-warning,#a15c07);font-style:normal}
 .lyric-editor__phrase small{color:var(--fluent-muted,rgb(93 93 93))}
 .lyric-editor__more{display:block;color:var(--fluent-muted,rgb(93 93 93));margin-top:4px}
 .lyric-editor__batch-tools{display:flex;gap:8px;margin-top:8px}

@@ -24,6 +24,9 @@ const SIGNATURES = [
   { fifths: 6, major: 'F#', minor: 'D#' },
   { fifths: 7, major: 'C#', minor: 'A#' }
 ];
+// Minor keys accept the raised leading tone.
+const SCALE_STEPS = { major: [0, 2, 4, 5, 7, 9, 11], minor: [0, 2, 3, 5, 7, 8, 10, 11] };
+const OUTSIDE_SCALE_WEIGHT = 3;
 const NOTE_NAME_PC = new Map([
   ['C', 0], ['B#', 0], ['C#', 1], ['Db', 1], ['D', 2], ['D#', 3], ['Eb', 3],
   ['E', 4], ['Fb', 4], ['E#', 5], ['F', 5], ['F#', 6], ['Gb', 6], ['G', 7],
@@ -93,12 +96,15 @@ export function estimateKeys(model) {
     for (let tonicPc = 0; tonicPc < 12; tonicPc++) {
       const profile = Array.from({ length: 12 }, (_, pc) => KS_PROFILES[mode][(pc - tonicPc + 12) % 12]);
       const match = correlation(histogram, profile);
+      // Profiles alone favour E minor for a C–D–E–G–A melody with F; time spent outside the key's scale decides such cases.
+      const scale = new Set(SCALE_STEPS[mode].map(step => (step + tonicPc) % 12));
+      const outside = histogram.reduce((sum, weight, pc) => sum + (scale.has(pc) ? 0 : weight), 0) / total;
       const fifths = keyForPitchClass(tonicPc, mode, match).fifths;
-      estimates.push({ tonic: keyFromSignature(fifths, mode, Number(match.toFixed(4))).tonic, mode, fifths, match });
+      estimates.push({ tonic: keyFromSignature(fifths, mode, Number(match.toFixed(4))).tonic, mode, fifths, match, score: match - OUTSIDE_SCALE_WEIGHT * outside });
     }
   }
-  estimates.sort((a, b) => b.match - a.match || (a.mode === b.mode ? 0 : a.mode === 'major' ? -1 : 1) || a.fifths - b.fifths);
-  return estimates.slice(0, 3).map(key => ({ ...key, match: Number(key.match.toFixed(4)) }));
+  estimates.sort((a, b) => b.score - a.score || (a.mode === b.mode ? 0 : a.mode === 'major' ? -1 : 1) || a.fifths - b.fifths);
+  return estimates.slice(0, 3).map(({ score, ...key }) => ({ ...key, match: Number(key.match.toFixed(4)) }));
 }
 
 function transposeNotes(model) {
