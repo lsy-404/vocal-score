@@ -60,3 +60,4 @@
  .sidebar-open:after{content:"";position:fixed;inset:60px 0 0;background:rgb(0 0 0 / .35);z-index:19}
 }
 @media print{.sidebar-navigation,#analysis-sidebar-panel{display:none!important}}
+@media(max-width:700px){.sidebar-collapsed .sidebar-content,.sidebar-collapsed .sidebar-footer{display:block}}

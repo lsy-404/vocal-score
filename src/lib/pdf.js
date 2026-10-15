@@ -6,7 +6,6 @@ export const PAPER_SIZES = Object.freeze({
   a5: Object.freeze({ width: 148, height: 210 }),
 });
 
-const RASTER_DPI = 220;
 const PAGE_MARGIN_MM = 10;
 const INLINE_STYLE_PROPERTIES = [
   'font-family', 'font-size', 'font-weight', 'font-style', 'fill', 'fill-opacity',
@@ -86,28 +85,35 @@ export async function createPdf(svgPages, {
   paperSize = 'a4',
   orientation = 'portrait',
   title = '',
+  dpi = 220,
+  signal,
 } = {}) {
   const pages = Array.from(svgPages ?? []);
   if (!pages.length) throw new TypeError('At least one SVG score page is required.');
   if (pages.some((page) => page?.localName !== 'svg')) throw new TypeError('Every score page must be an SVG element.');
+  signal?.throwIfAborted();
   if (document.fonts?.ready) await document.fonts.ready;
-  const {jsPDF}=await import('jspdf');
-
   const dimensions = getPaperDimensions(paperSize, orientation);
-  const pdf = new jsPDF({
-    orientation,
-    unit: 'mm',
-    format: [dimensions.width, dimensions.height],
-    compress: true,
+  if(!Number.isFinite(dpi)||dpi<72||dpi>300)throw new RangeError('PDF raster resolution must be between 72 and 300 DPI.');
+  const worker=new Worker(new URL('./pdf.worker.js',import.meta.url),{type:'module'});
+  let rejectResult;
+  const result=new Promise((resolve,reject)=>{
+    rejectResult=reject;
+    worker.onmessage=({data})=>data.error?reject(new Error(data.error)):resolve(new Uint8Array(data.bytes));
+    worker.onerror=event=>reject(new Error(event.message||'Unable to generate PDF.'));
   });
-  if (title) pdf.setProperties({ title: String(title) });
+  result.catch(()=>{});
+  const abort=()=>{worker.terminate();rejectResult(signal.reason);};
+  signal?.addEventListener('abort',abort,{once:true});
+  worker.postMessage({type:'start',dimensions,orientation,title});
   const printableWidth = dimensions.width - PAGE_MARGIN_MM * 2;
   const printableHeight = dimensions.height - PAGE_MARGIN_MM * 2;
-  const canvasWidth = Math.ceil(printableWidth * RASTER_DPI / 25.4);
-  const canvasHeight = Math.ceil(printableHeight * RASTER_DPI / 25.4);
+  const canvasWidth = Math.ceil(printableWidth * dpi / 25.4);
+  const canvasHeight = Math.ceil(printableHeight * dpi / 25.4);
 
+  try{
   for (let index = 0; index < pages.length; index += 1) {
-    if (index > 0) pdf.addPage([dimensions.width, dimensions.height], orientation);
+    signal?.throwIfAborted();
     const { image, objectUrl, bounds } = await loadSvgImage(pages[index], title);
     const canvas = document.createElement('canvas');
     canvas.width = canvasWidth;
@@ -121,7 +127,10 @@ export async function createPdf(svgPages, {
       const drawWidth = bounds.width * scale;
       const drawHeight = bounds.height * scale;
       context.drawImage(image, (canvasWidth - drawWidth) / 2, 0, drawWidth, drawHeight);
-      pdf.addImage(canvas, 'PNG', PAGE_MARGIN_MM, PAGE_MARGIN_MM, printableWidth, printableHeight, undefined, 'FAST');
+      const blob=await new Promise((resolve,reject)=>canvas.toBlob(value=>value?resolve(value):reject(new Error('Unable to encode a PDF page.')),'image/png'));
+      const bytes=await blob.arrayBuffer();
+      signal?.throwIfAborted();
+      worker.postMessage({type:'page',index,bytes,margin:PAGE_MARGIN_MM},[bytes]);
     } finally {
       URL.revokeObjectURL(objectUrl);
       image.removeAttribute('src');
@@ -129,6 +138,9 @@ export async function createPdf(svgPages, {
       canvas.height = 0;
     }
   }
-
-  return new Uint8Array(pdf.output('arraybuffer'));
+  worker.postMessage({type:'finish'});
+  return await result;
+  }finally{
+    signal?.removeEventListener('abort',abort);worker.terminate();
+  }
 }

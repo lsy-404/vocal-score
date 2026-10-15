@@ -34,8 +34,9 @@ export function annotateScore(xml, analysis, {showChords = false, showRepeats = 
   return new XMLSerializer().serializeToString(doc);
 }
 
-export function scoreMetadata(xml, {by='',fontFamily,lyricFontSize=14}={}) {
+export function scoreMetadata(xml, {title,by='',fontFamily,lyricFontSize=14}={}) {
   const doc=new DOMParser().parseFromString(xml,'application/xml'),root=doc.documentElement;
+  if(typeof title==='string')root.querySelector('work-title').textContent=title;
   const identification=root.querySelector(':scope > identification');
   if(by&&identification){const creator=doc.createElement('creator');creator.textContent=by;identification.insertBefore(creator,identification.firstChild);}
   if(fontFamily){const defaults=doc.createElement('defaults');for(const name of ['word-font','lyric-font']){const font=doc.createElement(name);font.setAttribute('font-family',fontFamily);font.setAttribute('font-size',String(lyricFontSize));defaults.append(font);}root.insertBefore(defaults,root.querySelector(':scope > part-list'));}

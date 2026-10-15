@@ -7,10 +7,12 @@ import {annotateScore,scoreMetadata} from './lib/annotations.js';
 import {decoratePages} from './lib/page-layout.js';
 import {loadDocuments,saveDocument,deleteDocument} from './lib/storage.js';
 import {createPdf,getPaperDimensions} from './lib/pdf.js';
+import {collectScoreTextTargets,applyScoreTextEdit} from './lib/score-text.js';
 import {t,i18n} from './i18n.js';
 import {translateWarning,translateError} from './ui-messages.js';
 import FluentCheckbox from './components/FluentCheckbox.vue';
 import LanguagePicker from './components/LanguagePicker.vue';
+import ScoreTextOverlay from './components/ScoreTextOverlay.vue';
 const LyricEditor=defineAsyncComponent(()=>import('./components/LyricEditor.vue'));
 const PdfViewer=defineAsyncComponent(()=>import('./components/PdfViewer.vue'));
 
@@ -18,7 +20,7 @@ const documents=ref([]),activeId=ref(''),ready=ref(false),busy=ref(false),draggi
 const activeSidebar=ref('files'),sidebarCollapsed=ref(false),mobileSidebarOpen=ref(false);
 const sidebarItems=[['files','工程文件'],['settings','谱面设置'],['analysis','乐段与和声分析'],['lyrics','歌词与声部文字'],['tuning','音高微调']];
 const score=ref(null),paper=ref(null),fileInput=ref(null),rendered=shallowRef(null);
-const pdfBytes=shallowRef(null),pdfError=ref('');
+const pdfBytes=shallowRef(null),pdfError=ref(''),textTargets=shallowRef([]),exportingPdf=ref(false);
 const error=ref(''),warnings=ref([]),storageState=ref('正在恢复文件…'),storageError=ref(false);
 function preferredTheme(){try{const value=localStorage.getItem('svp-vocal-score.theme');if(value)return value==='dark';}catch{}return matchMedia('(prefers-color-scheme: dark)').matches;}
 const dark=ref(preferredTheme());
@@ -28,13 +30,14 @@ const current=computed(()=>documents.value.find(item=>item.id===activeId.value))
 const s=computed(()=>current.value?.settings||emptySettings);
 const result=computed(()=>rendered.value?.result);
 const analysis=computed(()=>rendered.value?.analysis||{repeats:[],chords:[]});
-const canExport=computed(()=>Boolean(result.value)&&Boolean(pdfBytes.value)&&!busy.value);
+const canExport=computed(()=>Boolean(result.value)&&Boolean(pdfBytes.value)&&!busy.value&&!exportingPdf.value);
 const paperDimensions=computed(()=>getPaperDimensions(s.value.paperSize,s.value.orientation));
 const fonts={serif:'"SimSun", "Songti SC", "Times New Roman", serif',sans:'"Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif',kai:'"KaiTi", "STKaiti", "SimSun", serif',mono:'"Cascadia Mono", "Consolas", "Microsoft YaHei", monospace'};
 const keyChoices=[0,1,2,3,4,5,6,7,-1,-2,-3,-4,-5,-6,-7];
 const keyLabels=['C / a','G / e','D / b','A / f♯','E / c♯','B / g♯','F♯ / d♯','C♯ / a♯','F / d','B♭ / g','E♭ / c','A♭ / f','D♭ / b♭','G♭ / e♭','C♭ / a♭'];
 const removing=ref(new Set());
-let writes=Promise.resolve(),scheduled,resizeTimer,running=false,pending=false,revision=0,previousWidth=0;
+let writes=Promise.resolve(),scheduled,running=false,pending=false,revision=0,requestedSignature='',renderController;
+let conversionCache,engravingKey='',engravingMessages=[],downloadPdfCache;
 const saveQueue=new Map();let saveQueued=false;
 
 const signed=value=>value>0?`+${value}`:String(value);
@@ -76,9 +79,13 @@ function queueSave(item){
 }
 
 function scheduleRender(save=true){
-  revision++;rendered.value=null;pdfError.value='';error.value='';warnings.value=[];clearTimeout(scheduled);
+  if(save&&current.value)queueSave(current.value);
+  const item=current.value;
+  const signature=item?JSON.stringify([item.id,item.project,[...item.selected],[...item.chordChoices],item.transpose,item.fifths,item.title,Object.fromEntries(Object.entries(item.settings).filter(([key])=>key!=='targetRange')),i18n.global.locale.value]):'';
+  if(signature===requestedSignature)return;
+  requestedSignature=signature;revision++;renderController?.abort();downloadPdfCache=null;
+  rendered.value=null;pdfError.value='';error.value='';warnings.value=[];textTargets.value=[];clearTimeout(scheduled);
   if(!current.value){pending=false;busy.value=false;pdfBytes.value=null;score.value?.replaceChildren();return;}
-  if(save)queueSave(current.value);
   busy.value=true;
   pending=true;scheduled=setTimeout(renderPending,100);
 }
@@ -103,14 +110,21 @@ async function renderPending(){
   if(running||!pending||!current.value)return;
   running=true;busy.value=true;
   while(pending&&current.value){
-    pending=false;const item=current.value,version=revision;
+    pending=false;const item=current.value,version=revision;renderController=new AbortController();
     try{
-      const settings=item.settings;
-      const converted=createScore(item.project,{trackIds:[...item.selected],grid:Number(settings.grid),transpose:item.transpose,fifths:item.fifths,title:item.title,mergeContinuations:settings.merge,pitchAdjustment:pitchOptions(item)});
-      const found=analyzeScore(converted.model);found.repeats.forEach((repeat,index)=>{repeat.label=index<26?String.fromCharCode(65+index):`R${index+1}`;});
-      converted.xml=annotateScore(converted.xml,found,{showChords:settings.showChords,showRepeats:settings.showRepeats,choices:item.chordChoices,translate:t});
-      await nextTick();score.value.replaceChildren();const layout=layoutOptions(item),messages=[...converted.warnings];
-      converted.xml=scoreMetadata(converted.xml,layout);
+      const settings=item.settings,conversionKey=JSON.stringify([item.id,item.project,[...item.selected],settings.grid,item.transpose,item.fifths,settings.merge,pitchOptions(item)]);
+      if(conversionCache?.key!==conversionKey){
+        const converted=createScore(item.project,{trackIds:[...item.selected],grid:Number(settings.grid),transpose:item.transpose,fifths:item.fifths,mergeContinuations:settings.merge,pitchAdjustment:pitchOptions(item)});
+        const found=analyzeScore(converted.model);found.repeats.forEach((repeat,index)=>{repeat.label=index<26?String.fromCharCode(65+index):`R${index+1}`;});
+        conversionCache={key:conversionKey,converted,found};
+      }
+      const {found}=conversionCache;
+      const annotated=annotateScore(conversionCache.converted.xml,found,{showChords:settings.showChords,showRepeats:settings.showRepeats,choices:item.chordChoices,translate:t});
+      const layout=layoutOptions(item),converted={...conversionCache.converted,xml:scoreMetadata(annotated,layout)};
+      const nextEngravingKey=JSON.stringify([annotated,settings.view,settings.paperSize,settings.orientation,layout.fontFamily,layout.lyricFontSize,layout.titleFontSize,layout.headerFontSize,Boolean(layout.title),Boolean(layout.header),Boolean(layout.by),layout.showPageNumbers,layout.showMeasureNumbers]);
+      await nextTick();
+      if(nextEngravingKey!==engravingKey){
+      score.value.replaceChildren();engravingMessages=[];
       if(settings.view==='staff'){
         if(!globalThis.opensheetmusicdisplay?.OpenSheetMusicDisplay)throw new Error(t('乐谱排版组件未能加载，请刷新页面后重试。'));
         const osmd=new globalThis.opensheetmusicdisplay.OpenSheetMusicDisplay(score.value,{autoResize:false,backend:'svg',drawTitle:false,drawSubtitle:false,drawComposer:false,drawPartNames:true,drawMeasureNumbers:settings.measureNumbers,drawingParameters:'compacttight'});
@@ -122,14 +136,17 @@ async function renderPending(){
       }else{
         const dimensions=getPaperDimensions(settings.paperSize,settings.orientation);
         const header=layout.title?layout.headerFontSize+layout.titleFontSize+(layout.by?layout.headerFontSize:0)+24:layout.header||layout.by?Math.max(30,layout.headerFontSize*(layout.by?2:1)+12):0;
-        const numbered=await renderJianpu(converted.xml,score.value,{...layout,width:(dimensions.width-20)*5,height:(dimensions.height-20)*5-header-(layout.showPageNumbers?24:0),showPageNumbers:false,drawTitle:false});messages.push(...numbered.warnings);
+        const numbered=await renderJianpu(converted.xml,score.value,{...layout,width:(dimensions.width-20)*5,height:(dimensions.height-20)*5-header-(layout.showPageNumbers?24:0),showPageNumbers:false,drawTitle:false});engravingMessages.push(...numbered.warnings);
       }
       if(version!==revision)continue;
+      engravingKey=nextEngravingKey;
+      }
       const pages=decoratePages(score.value,layout);
-      const bytes=await createPdf(pages,{paperSize:settings.paperSize,orientation:settings.orientation,title:item.title});
+      const targets=collectScoreTextTargets(pages,item);
+      const bytes=await createPdf(pages,{paperSize:settings.paperSize,orientation:settings.orientation,title:item.title,dpi:144,signal:renderController.signal});
       if(version!==revision)continue;
-      pdfBytes.value=bytes;rendered.value={result:converted,analysis:found};warnings.value=messages;
-    }catch(cause){if(version===revision){error.value=readableError(cause);score.value?.replaceChildren();}}
+      pdfBytes.value=bytes;textTargets.value=targets;rendered.value={result:converted,analysis:found,pages};warnings.value=[...converted.warnings,...engravingMessages];
+    }catch(cause){if(version===revision){engravingKey='';error.value=readableError(cause);score.value?.replaceChildren();}}
   }
   running=false;busy.value=false;
 }
@@ -179,17 +196,27 @@ function exportSvg(){
   for(const source of pages){const bounds=source.viewBox.baseVal,w=bounds.width,h=bounds.height,copy=source.cloneNode(true);copy.setAttribute('x','0');copy.setAttribute('y',String(height));copy.setAttribute('width',String(w));copy.setAttribute('height',String(h));combined.append(copy);width=Math.max(width,w);height+=h;}
   combined.setAttribute('viewBox',`0 0 ${width} ${height}`);combined.setAttribute('width',String(width));combined.setAttribute('height',String(height));combined.setAttribute('style','background:white');download(new XMLSerializer().serializeToString(combined),s.value.view==='staff'?'_staff.svg':'_jianpu.svg','image/svg+xml;charset=utf-8');
 }
-function exportPdf(){if(canExport.value)download(pdfBytes.value,'.pdf','application/pdf');}
-function resize(){clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{const width=paper.value?.clientWidth||0;if(Math.abs(width-previousWidth)>20){previousWidth=width;scheduleRender(false);}},250);}
+async function exportPdf(){
+  if(!canExport.value)return;
+  const version=revision,item=current.value,pages=rendered.value.pages;
+  exportingPdf.value=true;
+  try{
+    if(!downloadPdfCache)downloadPdfCache=await createPdf(pages,{paperSize:item.settings.paperSize,orientation:item.settings.orientation,title:item.title,signal:renderController.signal});
+    if(version===revision)download(downloadPdfCache,'.pdf','application/pdf');
+  }catch(cause){if(version===revision)pdfError.value=readableError(cause);}
+  finally{exportingPdf.value=false;}
+}
+function editScoreText({target,value}){applyScoreTextEdit(current.value,target,value);}
+function openSidebar(section){activeSidebar.value=section;sidebarCollapsed.value=false;}
 function preventDrop(event){event.preventDefault();}
 function drop(event){dragging.value=false;importFiles(event.dataTransfer.files);}
 onMounted(async()=>{
-  window.addEventListener('resize',resize);window.addEventListener('dragover',preventDrop);window.addEventListener('drop',preventDrop);
+  window.addEventListener('dragover',preventDrop);window.addEventListener('drop',preventDrop);
   try{const records=await loadDocuments();documents.value=records.map(record=>({...record,settings:{...defaults(),...record.settings},selected:new Set(record.selected),chordChoices:new Map(record.chordChoices)}));activeId.value=documents.value[0]?.id||'';storageMessage(documents.value.length?'已保存在此浏览器':'文件和设置保存在当前浏览器');}
   catch{storageMessage('无法读取浏览器存储；请检查浏览器的数据权限。',true);}
   ready.value=true;if(current.value)scheduleRender(false);
 });
-onBeforeUnmount(()=>{clearTimeout(scheduled);clearTimeout(resizeTimer);window.removeEventListener('resize',resize);window.removeEventListener('dragover',preventDrop);window.removeEventListener('drop',preventDrop);});
+onBeforeUnmount(()=>{clearTimeout(scheduled);renderController?.abort();window.removeEventListener('dragover',preventDrop);window.removeEventListener('drop',preventDrop);});
 </script>
 
 <template>
@@ -201,7 +228,7 @@ onBeforeUnmount(()=>{clearTimeout(scheduled);clearTimeout(resizeTimer);window.re
   </header>
   <div class="workspace" :class="{'sidebar-collapsed':sidebarCollapsed,'sidebar-open':mobileSidebarOpen}" @keydown.esc="mobileSidebarOpen=false">
     <aside id="workspace-sidebar" class="sidebar" :aria-label="t('工作区导航')">
-      <div class="sidebar-navigation"><div class="sidebar-nav-heading"><strong>{{ t('工作区导航') }}</strong><button id="sidebar-collapse" class="fluent-button fluent-button--subtle" :aria-label="t(sidebarCollapsed?'展开侧栏':'收起侧栏')" :aria-expanded="!sidebarCollapsed" @click="sidebarCollapsed=!sidebarCollapsed">{{ sidebarCollapsed?'›':'‹' }}</button></div><nav :aria-label="t('工作区栏目')"><button v-for="item in sidebarItems" :key="item[0]" class="sidebar-nav-item" :class="{active:activeSidebar===item[0]}" :aria-current="activeSidebar===item[0]?'page':undefined" :aria-label="t(item[1])" :title="sidebarCollapsed?t(item[1]):undefined" @click="activeSidebar=item[0];mobileSidebarOpen=false"><span class="sidebar-nav-icon" aria-hidden="true">{{ {files:'▤',settings:'⚙',analysis:'⌁',lyrics:'♫',tuning:'♭'}[item[0]] }}</span><span class="sidebar-nav-label">{{ t(item[1]) }}</span></button></nav></div>
+      <div class="sidebar-navigation"><div class="sidebar-nav-heading"><strong>{{ t('工作区导航') }}</strong><button id="sidebar-collapse" class="fluent-button fluent-button--subtle" :aria-label="t(sidebarCollapsed?'展开侧栏':'收起侧栏')" :aria-expanded="!sidebarCollapsed" @click="sidebarCollapsed=!sidebarCollapsed">{{ sidebarCollapsed?'›':'‹' }}</button></div><nav :aria-label="t('工作区栏目')"><button v-for="item in sidebarItems" :key="item[0]" :data-section="item[0]" class="sidebar-nav-item" :class="{active:activeSidebar===item[0]}" :aria-current="activeSidebar===item[0]?'page':undefined" :aria-label="t(item[1])" :title="sidebarCollapsed?t(item[1]):undefined" @click="openSidebar(item[0])"><span class="sidebar-nav-icon" aria-hidden="true">{{ {files:'▤',settings:'⚙',analysis:'⌁',lyrics:'♫',tuning:'♭'}[item[0]] }}</span><span class="sidebar-nav-label">{{ t(item[1]) }}</span></button></nav></div>
       <div class="sidebar-content">
       <div v-show="activeSidebar==='files'" class="sidebar-panel sidebar-intro"><span class="eyebrow">SYNTHESIZER V</span><h1>{{ t('SVP 人声谱') }}</h1><p>{{ t('导入工程，生成五线谱与简谱。') }}</p></div>
       <label v-show="activeSidebar==='files'" id="dropzone" class="dropzone" :class="{dragover:dragging}" tabindex="0" role="button" for="file-input" @keydown.enter.prevent="fileInput.click()" @keydown.space.prevent="fileInput.click()" @dragover.prevent="dragging=true" @dragleave.prevent="dragging=false" @drop.prevent="drop">
@@ -235,14 +262,14 @@ onBeforeUnmount(()=>{clearTimeout(scheduled);clearTimeout(resizeTimer);window.re
       <footer class="sidebar-footer">{{ t('本地转换 · 无需上传') }}<br><a href="https://github.com/opensheetmusicdisplay/opensheetmusicdisplay" target="_blank" rel="noopener">OpenSheetMusicDisplay</a> · <a href="https://github.com/lsy-404/platform-kit" target="_blank" rel="noopener">Platform Kit Fluent</a></footer></div>
     </aside>
     <main>
-      <div class="score-toolbar"><button id="sidebar-mobile-toggle" class="fluent-button fluent-button--subtle mobile-sidebar-toggle" :aria-controls="'workspace-sidebar'" :aria-expanded="mobileSidebarOpen" :aria-label="t(mobileSidebarOpen?'关闭工作区栏目':'打开工作区栏目')" @click="mobileSidebarOpen=!mobileSidebarOpen">☰ {{ t('栏目') }}</button><div><span class="eyebrow">VOCAL SHEET MUSIC</span><h2 id="document-title">{{ t(current?(s.view==='staff'?'人声五线谱':'人声简谱'):'导入 SVP 开始制谱') }}</h2></div><div class="actions"><button id="pdf-button" class="fluent-button fluent-button--primary" :disabled="!canExport" @click="exportPdf">↓ {{ t('下载 PDF') }}</button><button id="export-button" class="fluent-button" :disabled="!canExport" @click="exportXml">↓ {{ t('导出 MusicXML') }}</button></div></div>
+      <div class="score-toolbar"><button id="sidebar-mobile-toggle" class="fluent-button fluent-button--subtle mobile-sidebar-toggle" :aria-controls="'workspace-sidebar'" :aria-expanded="mobileSidebarOpen" :aria-label="t(mobileSidebarOpen?'关闭工作区栏目':'打开工作区栏目')" @click="mobileSidebarOpen=!mobileSidebarOpen">☰ {{ t('栏目') }}</button><div><span class="eyebrow">VOCAL SHEET MUSIC</span><h2 id="document-title">{{ t(current?(s.view==='staff'?'人声五线谱':'人声简谱'):'导入 SVP 开始制谱') }}</h2></div><div class="actions"><button id="pdf-button" class="fluent-button fluent-button--primary" :disabled="!canExport" @click="exportPdf">↓ {{ t(exportingPdf?'正在生成 PDF…':'下载 PDF') }}</button><button id="export-button" class="fluent-button" :disabled="!canExport" @click="exportXml">↓ {{ t('导出 MusicXML') }}</button></div></div>
       <div class="score-meta"><span id="source-meta">{{ current?`SVP ${current.project.version??''} · ${current.project.meters[0].numerator}/${current.project.meters[0].denominator} · ♩ = ${current.project.tempos[0].bpm}`:t('未导入工程') }}</span><div><span id="note-meta">{{ result?t('{parts} 声部 · {count} 音符',{parts:result.stats.partCount,count:result.stats.noteCount}):'' }}</span><span class="meta-divider">/</span><span id="measure-meta">{{ result?t('{count} 小节',{count:result.stats.measureCount}):'' }}</span></div></div>
       <div class="view-toolbar"><div class="view-switch" role="group" :aria-label="t('记谱方式')"><button v-for="mode in ['staff','jianpu']" :id="`${mode}-view`" :key="mode" class="fluent-button" :disabled="!current" :aria-pressed="s.view===mode" @click="s.view=mode">{{ t(mode==='staff'?'五线谱':'简谱') }}</button></div><button id="svg-button" class="fluent-button fluent-button--subtle text-button" :disabled="!canExport" @click="exportSvg">{{ t('导出当前谱面 SVG ↗') }}</button></div>
       <div v-if="error||warnings.length" id="message" class="fluent-notice" :class="[error?'error fluent-notice--danger':'fluent-notice--warning']" role="status" aria-live="polite">{{ error||warnings.map(translateWarning).join(' ') }}</div>
       <div v-if="busy" id="busy" class="busy" role="status"><span class="spinner"/>{{ t('正在排版乐谱…') }}</div>
-      <div class="paper-wrap"><article id="paper" ref="paper" class="paper" :aria-label="t('乐谱预览')"><div v-if="!current" class="empty-score"><strong>{{ t('导入 SVP 开始制谱') }}</strong><p>{{ t('选择或拖入文件，生成五线谱与简谱。') }}</p></div><PdfViewer v-if="pdfBytes" :bytes="pdfBytes" @error="pdfError=readableError($event)"/><p v-if="pdfError" class="pdf-error">{{ pdfError }}</p></article></div>
+      <div class="paper-wrap"><article id="paper" ref="paper" class="paper" :aria-label="t('乐谱预览')"><div v-if="!current" class="empty-score"><strong>{{ t('导入 SVP 开始制谱') }}</strong><p>{{ t('选择或拖入文件，生成五线谱与简谱。') }}</p></div><PdfViewer v-if="pdfBytes" :bytes="pdfBytes" @error="pdfError=readableError($event)"><template #page-overlay="{pageNumber}"><ScoreTextOverlay :targets="textTargets" :page-number="pageNumber" :disabled="busy||exportingPdf" @commit="editScoreText"/></template></PdfViewer><p v-if="pdfError" class="pdf-error">{{ pdfError }}</p></article></div>
       <div id="score" ref="score" class="score-source" :style="{width:`${paperDimensions.width*3.78}px`}" aria-hidden="true"/>
-      <div class="canvas-footer"><span>{{ t('保留音高、歌词、拍号与速度，跨小节音符自动连线。') }}</span><span id="render-meta">{{ current?`${s.paperSize.toUpperCase()} · PDF`:'' }}</span></div>
+      <div class="canvas-footer"><span>{{ t('点击谱面文字可编辑') }}</span><span id="render-meta">{{ current?`${s.paperSize.toUpperCase()} · PDF`:'' }}</span></div>
     </main>
   </div>
 </template>
