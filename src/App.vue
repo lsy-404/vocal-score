@@ -217,6 +217,7 @@ onBeforeUnmount(()=>{clearTimeout(scheduled);renderController?.abort();window.re
 <template>
   <header class="topbar">
     <a class="brand" href="./" :aria-label="t('声谱首页')"><span class="brand-mark" aria-hidden="true">♮</span><span>{{ t('声谱') }} <small>SVP TO SCORE</small></span></a>
+    <a class="main-menu-link fluent-button fluent-button--subtle" href="/" :aria-label="t('返回 Tiny Projects 主菜单')"><span aria-hidden="true">←</span>{{ t('返回主菜单') }}</a>
     <div class="local-badge"><span/>{{ t('文件仅在本机处理') }}</div>
     <button id="theme-button" class="fluent-button fluent-button--subtle" :aria-pressed="dark" :aria-label="t(dark?'切换浅色主题':'切换深色主题')" @click="dark=!dark">{{ t(dark?'浅色':'深色') }}</button>
     <LanguagePicker/>

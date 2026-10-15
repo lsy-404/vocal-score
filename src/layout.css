@@ -61,3 +61,6 @@
 }
 @media print{.sidebar-navigation,#analysis-sidebar-panel{display:none!important}}
 @media(max-width:700px){.sidebar-collapsed .sidebar-content,.sidebar-collapsed .sidebar-footer{display:block}}
+
+.main-menu-link{display:inline-flex;align-items:center;gap:6px;min-height:30px;padding:0 9px;white-space:nowrap;text-decoration:none;font-size:12px}
+@media(max-width:700px){.topbar{height:auto;min-height:92px;flex-wrap:wrap;align-content:center;padding:8px 15px;gap:6px 8px}.brand{order:1}.topbar #theme-button{order:2}.language-picker{order:3;margin-left:auto}.main-menu-link{order:4;flex-basis:100%;justify-content:flex-start;width:max-content}.workspace,.workspace.sidebar-collapsed{min-height:calc(100vh - 92px)}.sidebar,.sidebar-collapsed .sidebar{top:92px}.sidebar-open:after{inset:92px 0 0}}
