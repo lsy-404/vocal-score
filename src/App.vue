@@ -28,7 +28,7 @@ const previewPages=shallowRef([]),pdfError=ref(''),textTargets=shallowRef([]),ex
 const error=ref(''),warnings=ref([]),storageState=ref('正在恢复文件…'),storageError=ref(false);
 function preferredTheme(){try{const value=localStorage.getItem('svp-vocal-score.theme');if(value)return value==='dark';}catch{}return matchMedia('(prefers-color-scheme: dark)').matches;}
 const dark=ref(preferredTheme());
-const defaults=()=>({grid:16,view:'staff',targetRange:'60,84',merge:true,showChords:false,showRepeats:true,useTuning:false,threshold:50,font:'serif',lyricSize:14,titleSize:24,headerSize:12,header:'',by:'',margin:10,modulation:true,noteMerge:'low',pageNumbers:true,measureNumbers:true,paperSize:'a4',orientation:'portrait'});
+const defaults=()=>({grid:16,view:'staff',targetRange:'60,84',merge:true,showChords:false,showRepeats:true,useTuning:false,threshold:50,font:'serif',lyricSize:14,titleSize:24,headerSize:12,header:'',by:'',margin:10,modulation:true,triplets:true,noteMerge:'low',pageNumbers:true,measureNumbers:true,paperSize:'a4',orientation:'portrait'});
 const emptySettings=defaults();
 const current=computed(()=>documents.value.find(item=>item.id===activeId.value));
 const s=computed(()=>current.value?.settings||emptySettings);
@@ -122,9 +122,9 @@ async function renderPending(){
   while(pending&&current.value){
     pending=false;const item=current.value,version=revision;renderController=new AbortController();
     try{
-      const settings=item.settings,conversionKey=JSON.stringify([item.id,item.project,[...item.selected],settings.grid,item.transpose,item.fifths,settings.merge,settings.modulation,settings.noteMerge,pitchOptions(item)]);
+      const settings=item.settings,conversionKey=JSON.stringify([item.id,item.project,[...item.selected],settings.grid,item.transpose,item.fifths,settings.merge,settings.modulation,settings.triplets,settings.noteMerge,pitchOptions(item)]);
       if(conversionCache?.key!==conversionKey){
-        const converted=createScore(item.project,{trackIds:[...item.selected],grid:Number(settings.grid),transpose:item.transpose,fifths:item.fifths,mergeContinuations:settings.merge,modulation:settings.modulation,noteMerge:settings.noteMerge,preserveOrder:true,pitchAdjustment:pitchOptions(item)});
+        const converted=createScore(item.project,{trackIds:[...item.selected],grid:Number(settings.grid),transpose:item.transpose,fifths:item.fifths,mergeContinuations:settings.merge,modulation:settings.modulation,triplets:Boolean(settings.triplets),noteMerge:settings.noteMerge,preserveOrder:true,pitchAdjustment:pitchOptions(item)});
         const found=analyzeScore(converted.model);found.repeats.forEach((repeat,index)=>{repeat.label=index<26?String.fromCharCode(65+index):`R${index+1}`;});
         conversionCache={key:conversionKey,converted,found};
       }
@@ -278,6 +278,7 @@ onBeforeUnmount(()=>{clearTimeout(scheduled);renderController?.abort();window.re
       <section v-show="activeSidebar==='settings'" class="setting-section settings sidebar-panel"><h2>{{ t('谱面设置') }}</h2>
         <label for="score-title">{{ t('乐谱标题') }}<input id="score-title" :value="current?.title||''" class="fluent-field__input" type="text" maxlength="160" autocomplete="off" :disabled="!current" @input="current.title=$event.target.value"></label>
         <div class="setting-row"><label for="grid">{{ t('节奏网格') }}<select id="grid" v-model.number="s.grid" class="fluent-select__control" :disabled="!current"><option :value="8">{{ t('八分音符') }}</option><option :value="16">{{ t('十六分音符') }}</option><option :value="32">{{ t('三十二分音符') }}</option></select></label><label for="key">{{ t('调号') }}<select id="key" :value="current?.fifths||0" class="fluent-select__control" :disabled="!current" @change="current.fifths=Number($event.target.value);current.pitchMessage={type:'manualKey'}"><option v-for="(fifths,index) in keyChoices" :key="fifths" :value="fifths">{{ keyLabels[index] }} · {{ fifths===0?t('无升降号'):`${Math.abs(fifths)}${fifths>0?'♯':'♭'}` }}</option></select></label></div>
+        <div id="triplet-setting"><FluentCheckbox v-model="s.triplets" :disabled="!current" :label="t('识别三连音')"/></div>
         <div class="transpose-row"><span>{{ t('移调') }}</span><div class="stepper"><button id="transpose-down" class="fluent-button" :disabled="!current" :aria-label="t('降低半音')" @click="changeTranspose(-1)">−</button><output id="transpose-value">{{ signed(current?.transpose||0) }}</output><button id="transpose-up" class="fluent-button" :disabled="!current" :aria-label="t('升高半音')" @click="changeTranspose(1)">+</button></div><span class="unit">{{ t('半音') }}</span></div>
         <div class="pitch-tools"><label for="target-range">{{ t('目标音区') }}<select id="target-range" v-model="s.targetRange" class="fluent-select__control" :disabled="!current"><option value="48,72">{{ t('较低 · C3–C5') }}</option><option value="55,79">{{ t('中间 · G3–G5') }}</option><option value="60,84">{{ t('较高 · C4–C6') }}</option></select></label><button id="auto-transpose" class="fluent-button" :disabled="!current" @click="autoTranspose">{{ t('自动移调') }}</button></div>
         <p id="pitch-summary" class="setting-hint" aria-live="polite"><template v-if="current">{{ t('音域 {range} · {shift} 半音。',{range,shift:signed(current.transpose)}) }}{{ pitchMessage }}</template></p><div id="modulation-setting"><FluentCheckbox v-model="s.modulation" :disabled="!current" :label="t('识别转调')"/></div><div id="tuning-switch"><FluentCheckbox v-model="s.useTuning" :disabled="!current" :label="t('考虑调校参数')"/></div><p v-if="keyChangeSummary" id="modulation-summary" class="setting-hint">{{ keyChangeSummary }}</p>

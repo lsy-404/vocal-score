@@ -204,6 +204,45 @@ function meterAtBar(meters, bar) {
 
 function quantize(value, step) { return Math.max(0, Math.round(value / step) * step); }
 
+// The triplet subdivision of a quarter beat at each rhythm grid: eighth triplets, or sixteenth triplets from a sixteenth grid up.
+const TRIPLET_UNIT = { 8: QUARTER / 3, 16: QUARTER / 6, 32: QUARTER / 6 };
+
+// Starts (in blicks) of the quarter beats of every bar up to `until`; triplets are only written in meters counted in quarters.
+function quarterBeats(meters, until) {
+  const beats = [];
+  for (let bar = 0, start = 0; start < until && bar <= 10000; bar += 1) {
+    const meter = meterAtBar(meters, bar);
+    if (meter.denominator === 4) for (let beat = 0; beat < meter.numerator; beat += 1) beats.push(start + beat * QUARTER);
+    start += QUARTER * 4 * meter.numerator / meter.denominator;
+  }
+  return beats;
+}
+
+function beatAt(beats, position) {
+  let low = 0, high = beats.length;
+  while (low < high) { const middle = (low + high) >>> 1; if (beats[middle] <= position) low = middle + 1; else high = middle; }
+  return low > 0 && position < beats[low - 1] + QUARTER ? low - 1 : -1;
+}
+
+// Beats whose note boundaries sit clearly on the triplet grid and fit it far better than the straight grid. Onsets count
+// fully and ends half; a beat needs a boundary off the straight grid, so straight rhythms never turn into triplets.
+function tripletBeats(notes, beats, step, unit) {
+  const fit = new Map();
+  const visit = (position, weight) => {
+    const index = beatAt(beats, position);
+    if (index < 0) return;
+    const offset = position - beats[index], snapped = Math.round(offset / unit) * unit;
+    const entry = fit.get(index) ?? { straight: 0, triplet: 0, fits: true, off: false };
+    entry.straight += weight * Math.abs(position - quantize(position, step));
+    entry.triplet += weight * Math.abs(offset - snapped);
+    if (weight === 1 && Math.abs(offset - snapped) >= QUARTER / 16) entry.fits = false;
+    if ((beats[index] + snapped) % step) entry.off = true;
+    fit.set(index, entry);
+  };
+  for (const note of notes) { visit(Number(note.onset), 1); visit(Number(note.onset) + Number(note.duration), 0.5); }
+  return new Set([...fit].filter(([, entry]) => entry.fits && entry.off && entry.triplet < entry.straight / 2).map(([index]) => index));
+}
+
 function noteValues(divisions) {
   return [
     ['whole', divisions * 4], ['half', divisions * 2], ['quarter', divisions], ['eighth', divisions / 2],
@@ -228,21 +267,40 @@ function beatStarts(meter, divisions, length) {
   return starts;
 }
 
+function beatIndex(starts, tick) {
+  let beat = 0;
+  while (beat < starts.length - 2 && starts[beat + 1] <= tick) beat += 1;
+  return beat;
+}
+
+// Values written under a 3:2 bracket within one triplet beat, by the time they take: quarter, dotted eighth, eighth, 16th.
+function tripletValues(divisions, unitTicks) {
+  return noteValues(divisions).filter(item => item.dots < 2 && item.duration * 2 % 3 === 0)
+    .map(item => ({ ...item, duration: item.duration * 2 / 3, tuplet: true }))
+    .filter(item => item.duration < divisions && item.duration % unitTicks === 0);
+}
+
+const NO_TRIPLETS = new Set();
+
 // Splits [start, end) into written values that show the beat: within a beat any single value fits; from a beat a value may
-// span whole beats or be dotted past the next beat. Rests additionally keep the middle of an even bar visible.
-function spellSpan(start, end, starts, values, rest) {
+// span whole beats or be dotted past the next beat. Rests additionally keep the middle of an even bar visible. A triplet
+// beat that is not covered whole is written in triplet values, and no straight value may end inside one.
+function spellSpan(start, end, starts, values, rest, triplets = NO_TRIPLETS, triplet = []) {
   const count = starts.length - 1;
   const middle = count >= 4 && count % 2 === 0 ? starts[count / 2] : null;
+  const insideTriplet = tick => { const beat = beatIndex(starts, tick); return triplets.has(beat) && tick > starts[beat] && tick < starts[beat + 1]; };
   const pieces = [];
   for (let cursor = start; cursor < end;) {
-    let beat = 0;
-    while (beat < count - 1 && starts[beat + 1] <= cursor) beat += 1;
+    const beat = beatIndex(starts, cursor);
     const beatEnd = starts[beat + 1];
     let value;
-    if (cursor === starts[beat]) {
+    if (triplets.has(beat) && (cursor !== starts[beat] || end < beatEnd)) {
+      const limit = Math.min(end, beatEnd);
+      value = triplet.find(item => item.duration === limit - cursor) || triplet.find(item => cursor + item.duration <= limit);
+    } else if (cursor === starts[beat]) {
       value = values.find(item => {
         const stop = cursor + item.duration;
-        if (stop > end) return false;
+        if (stop > end || insideTriplet(stop)) return false;
         if (stop <= beatEnd) return true;
         const onBeat = starts.includes(stop);
         if (rest) return onBeat && (middle === null || stop <= middle || cursor >= middle || (cursor === 0 && stop === starts[count]));
@@ -251,13 +309,13 @@ function spellSpan(start, end, starts, values, rest) {
     } else {
       // An off-beat note lasting one beat (eighth–quarter–eighth) stays whole unless it would hide the middle of the bar.
       const beatLength = beatEnd - starts[beat];
-      const syncopated = !rest && cursor - starts[beat] === beatLength / 2 && cursor + beatLength <= end && beatEnd !== middle && beat + 1 < count;
+      const syncopated = !rest && cursor - starts[beat] === beatLength / 2 && cursor + beatLength <= end && beatEnd !== middle && beat + 1 < count && !triplets.has(beat + 1);
       const limit = Math.min(end, beatEnd);
       value = (syncopated && values.find(item => item.duration === beatLength && !item.dots))
         || values.find(item => item.duration === limit - cursor) || values.find(item => cursor + item.duration <= limit);
     }
     if (!value) return null;
-    pieces.push({ start: cursor, duration: value.duration, type: value.type, dots: value.dots });
+    pieces.push({ start: cursor, duration: value.duration, type: value.type, dots: value.dots, tuplet: Boolean(value.tuplet) });
     cursor += value.duration;
   }
   return pieces;
@@ -266,15 +324,20 @@ function spellSpan(start, end, starts, values, rest) {
 const BEAM_LEVELS = { eighth: 1, '16th': 2, '32nd': 3, '64th': 4 };
 
 // Beams notes shorter than a quarter within each beat; four plain eighths share one beam across a half bar of an even x/4 meter.
+// Each triplet beat gets one bracket from its first value to its last.
 function beamPieces(pieces, starts, meter) {
   const count = starts.length - 1;
-  const beatOf = tick => { let beat = 0; while (beat < count - 1 && starts[beat + 1] <= tick) beat += 1; return beat; };
   const beamable = piece => !piece.span.rest && BEAM_LEVELS[piece.type];
-  const group = pieces.map(piece => beatOf(piece.start));
+  const group = pieces.map(piece => beatIndex(starts, piece.start));
+  pieces.forEach((piece, index) => {
+    if (!piece.tuplet) return;
+    piece.tupletStart = !pieces[index - 1]?.tuplet || group[index - 1] !== group[index];
+    piece.tupletStop = !pieces[index + 1]?.tuplet || group[index + 1] !== group[index];
+  });
   if (meter.denominator === 4 && count % 2 === 0) {
     for (let beat = 0; beat < count; beat += 2) {
       const members = pieces.filter((piece, index) => group[index] === beat || group[index] === beat + 1);
-      if (members.length === 4 && members.every(piece => beamable(piece) && piece.type === 'eighth' && !piece.dots)) {
+      if (members.length === 4 && members.every(piece => beamable(piece) && piece.type === 'eighth' && !piece.dots && !piece.tuplet)) {
         pieces.forEach((piece, index) => { if (group[index] === beat + 1) group[index] = beat; });
       }
     }
@@ -341,15 +404,18 @@ function unpitchedXml(pitch) {
 
 function pieceXml(piece, fifths, measureIndex, partIndex, laneIndex, percussion = false) {
   const { span } = piece;
-  if (span.rest) return `<note><rest/><duration>${piece.duration}</duration><voice>${laneIndex + 1}</voice><type>${piece.type}</type>${'<dot/>'.repeat(piece.dots)}</note>`;
+  const modification = piece.tuplet ? '<time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification>' : '';
+  const bracket = `${piece.tupletStart ? '<tuplet type="start" bracket="yes"/>' : ''}${piece.tupletStop ? '<tuplet type="stop"/>' : ''}`;
+  if (span.rest) return `<note><rest/><duration>${piece.duration}</duration><voice>${laneIndex + 1}</voice><type>${piece.type}</type>${'<dot/>'.repeat(piece.dots)}${modification}${bracket ? `<notations>${bracket}</notations>` : ''}</note>`;
   const tieIn = piece.index > 0 || span.before;
   const tieOut = !piece.last || span.after;
   const ties = `${tieIn ? '<tie type="stop"/>' : ''}${tieOut ? '<tie type="start"/>' : ''}`;
-  const notations = `${tieIn ? '<tied type="stop"/>' : ''}${tieOut ? '<tied type="start"/>' : ''}`;
+  const tied = `${tieIn ? '<tied type="stop"/>' : ''}${tieOut ? '<tied type="start"/>' : ''}`;
   const write = (note, fallbackNoteIndex, chord) => {
     const [pitch, notehead] = percussion ? unpitchedXml(note.pitch) : [pitchXml(note.pitch, fifths), ''];
     const lyric = chord || piece.index > 0 ? '' : span.lyricMode === 'continue' ? '<lyric><extend type="continue"/></lyric>' : lyricXml(note.lyrics, span.lyricMode);
-    return `<note id="${musicXmlNoteId(note, piece.index, measureIndex, partIndex, laneIndex, fallbackNoteIndex)}">${chord ? '<chord/>' : ''}${pitch}<duration>${piece.duration}</duration>${ties}<voice>${laneIndex + 1}</voice><type>${piece.type}</type>${'<dot/>'.repeat(piece.dots)}${notehead}${chord ? '' : (piece.beams ?? []).join('')}${notations ? `<notations>${notations}</notations>` : ''}${lyric}</note>`;
+    const notations = chord ? tied : tied + bracket;
+    return `<note id="${musicXmlNoteId(note, piece.index, measureIndex, partIndex, laneIndex, fallbackNoteIndex)}">${chord ? '<chord/>' : ''}${pitch}<duration>${piece.duration}</duration>${ties}<voice>${laneIndex + 1}</voice><type>${piece.type}</type>${'<dot/>'.repeat(piece.dots)}${modification}${notehead}${chord ? '' : (piece.beams ?? []).join('')}${notations ? `<notations>${notations}</notations>` : ''}${lyric}</note>`;
   };
   return [write(span.note, span.fallbackNoteIndex, false), ...span.chord.map(member => write(member.note, member.fallbackNoteIndex, true))].join('');
 }
@@ -617,11 +683,12 @@ function overlapRatio(notes, signal) {
   return Math.min(1, covered / total);
 }
 
-export function createScore(project, { trackIds, grid = 16, transpose = 0, fifths = 0, title, mergeContinuations = false, modulation = false, noteMerge = 'none', preserveOrder = false, pitchAdjustment = { enabled: true, thresholdCents: 50 } } = {}) {
+export function createScore(project, { trackIds, grid = 16, transpose = 0, fifths = 0, title, mergeContinuations = false, modulation = false, noteMerge = 'none', preserveOrder = false, triplets = false, pitchAdjustment = { enabled: true, thresholdCents: 50 } } = {}) {
   if (!project || !Array.isArray(project.tracks)) throw new TypeError('Project must contain parsed tracks.');
   if (![4, 8, 16, 32].includes(grid)) throw new RangeError('Grid must be 4, 8, 16, or 32.');
   if (trackIds !== undefined && !Array.isArray(trackIds)) throw new TypeError('Track IDs must be an array.');
   if (typeof mergeContinuations !== 'boolean') throw new TypeError('mergeContinuations must be a boolean.');
+  if (typeof triplets !== 'boolean') throw new TypeError('triplets must be a boolean.');
   if (noteMerge !== 'none' && !NOTE_MERGE[noteMerge]) throw new RangeError('noteMerge must be none, low, medium or high.');
   if (!pitchAdjustment || typeof pitchAdjustment !== 'object' || typeof pitchAdjustment.enabled !== 'boolean' || !finite(pitchAdjustment.thresholdCents) || Number(pitchAdjustment.thresholdCents) <= 0 || Number(pitchAdjustment.thresholdCents) > 1200) throw new RangeError('Pitch adjustment requires an enabled flag and threshold between 0 and 1200 cents.');
   if (!finite(transpose) || !Number.isInteger(Number(transpose)) || !finite(fifths) || !Number.isInteger(Number(fifths)) || Number(fifths) < -7 || Number(fifths) > 7) throw new RangeError('Invalid transposition or key signature.');
@@ -632,17 +699,26 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
   const selected = instrumental && !preserveOrder ? [...chosen].sort((a, b) => (a.instrument?.order ?? 80) - (b.instrument?.order ?? 80)) : chosen;
   const merging = mergeContinuations && !instrumental;
   const warnings = [...(project.warnings || [])];
-  const divisions = grid;
   const step = QUARTER * 4 / grid;
   const meters = [...project.meters].sort((a, b) => a.index - b.index);
   const tempos = [...project.tempos].sort((a, b) => a.position - b.position);
+  // Triplet beats are chosen per part for instruments and across all voices otherwise, so that merging parts never re-times a note.
+  const unit = triplets ? TRIPLET_UNIT[grid] : undefined;
+  const beats = unit ? quarterBeats(meters, selected.reduce((last, track) => track.notes.reduce((end, note) => Math.max(end, Number(note.onset) + Number(note.duration)), last), 0) + QUARTER) : [];
+  const shared = unit && !instrumental ? tripletBeats(selected.flatMap(track => track.notes), beats, step, unit) : null;
+  const tripletSets = selected.map(track => (unit ? shared ?? tripletBeats(track.notes, beats, step, unit) : NO_TRIPLETS));
+  // Triplets need a third of the straight tick, so the divisions only grow when a score has them.
+  const divisions = tripletSets.some(set => set.size) ? grid * 3 : grid;
   let mergedNoteCount = 0;
   const normalized = selected.map((track, sourceIndex) => {
     let shifted = 0;
+    const tripletSet = tripletSets[sourceIndex];
+    const tripletBeat = position => { if (!tripletSet.size) return null; const index = beatAt(beats, position); return index >= 0 && tripletSet.has(index) ? beats[index] : null; };
+    const snap = position => { const beat = tripletBeat(position); return beat === null ? quantize(position, step) : beat + Math.round((position - beat) / unit) * unit; };
     const notes = track.notes.map((note, sourceOrder) => {
-      const start = quantize(note.onset, step);
+      const start = snap(Number(note.onset));
       const originalEnd = Number(note.onset) + Number(note.duration);
-      const end = Math.max(start + step, quantize(originalEnd, step));
+      const end = Math.max(start + (tripletBeat(start) === null ? step : unit), snap(originalEnd));
       if (start !== Number(note.onset) || end !== originalEnd) shifted += 1;
       const tuning = note.tuning ?? {};
       const detune = tuning.detuneCents === null ? 0 : Number.isFinite(tuning.detuneCents) ? tuning.detuneCents : 0;
@@ -689,7 +765,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
       else if (note.lyrics && note.lyrics !== 'br' && note.lyrics !== 'SP' && note.lyrics !== 'sil' && nextExtender) lyricMode = 'start';
       return { ...note, lyricMode };
     }));
-    return { ...track, sourceIndex, lanes };
+    return { ...track, sourceIndex, lanes, triplets: tripletSet };
   });
   const sourcePartCount = normalized.length;
   const mergeResult = merging ? mergeDisjointNotes(normalized) : {
@@ -719,7 +795,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
       for (const note of lane) latestEnd = Math.max(latestEnd, note.end);
     }
   }
-  const finalTick = latestEnd / QUARTER * divisions;
+  const finalTick = latestEnd * divisions / QUARTER;
   let bar = 0;
   let cursorTick = 0;
   const measures = [];
@@ -732,7 +808,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
     bar += 1;
     if (bar > 10000) throw new Error('Score exceeds the supported measure limit.');
   }
-  const tick = position => position / QUARTER * divisions;
+  const tick = position => position * divisions / QUARTER;
   const clefs = outputTracks.map(track => {
     if (track.instrument?.percussion) return 'percussion';
     if (track.instrument?.clef === 'bass' || track.instrument?.clef === 'alto') return track.instrument.clef;
@@ -744,6 +820,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
   for (const [index] of measures.entries()) measureFifths.push(keyChanges.find(change => change.measureIndex === index)?.fifths ?? measureFifths.at(-1) ?? Math.trunc(fifths));
   const marks = tempoMarks(tempos, step);
   const values = noteValues(divisions);
+  const tripletList = unit ? tripletValues(divisions, Math.round(unit / QUARTER * divisions)) : [];
   const parts = outputTracks.map((track, partIndex) => {
     const id = `P${partIndex + 1}`;
     const body = measures.map((measure, measureIndex) => {
@@ -760,6 +837,9 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
       }).join('');
       const measureLength = measure.end - measure.start;
       const starts = beatStarts(measure.meter, divisions, measureLength);
+      const measureTriplets = track.triplets?.size && measure.meter.denominator === 4
+        ? new Set(starts.slice(0, -1).flatMap((offset, beat) => (track.triplets.has(beatAt(beats, Math.round((measure.start + offset) * QUARTER / divisions))) ? [beat] : [])))
+        : NO_TRIPLETS;
       const voiceXml = [];
       track.lanes.forEach((lane, laneIndex) => {
         let local = 0;
@@ -781,7 +861,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
         });
         if (local < measureLength) spans.push({ rest: true, start: local, end: Math.round(measureLength) });
         const pieces = spans.flatMap(span => {
-          const spelled = spellSpan(span.start, span.end, starts, values, span.rest);
+          const spelled = spellSpan(span.start, span.end, starts, values, span.rest, measureTriplets, tripletList);
           if (!spelled) throw new Error(`Cannot represent ${span.rest ? 'rest ' : ''}duration ${span.end - span.start} at the selected grid.`);
           return spelled.map((piece, index) => ({ ...piece, span, index, last: index === spelled.length - 1 }));
         });
@@ -839,6 +919,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
     parts: parts.map(({ id, name }) => ({ id, name })),
     keyChanges: keyChanges.map(change => ({ ...change })),
     noteMerge: { level: noteMerge, mergedCount: mergedNoteCount },
+    triplets: { enabled: Boolean(unit), beatCount: new Set(tripletSets.flatMap(set => [...set])).size },
     model,
     merging: { enabled: merging, movedNoteCount: mergeResult.movedNoteCount, sourcePartCount, outputPartCount: outputTracks.length, moves: mergeResult.moves, roles },
     pitchAdjustments: {

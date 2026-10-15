@@ -105,9 +105,11 @@ function parseMeasure(measure, divisions, warnings, partName, tonic, minor) {
       const pitch = rest ? null : parsePitch(item, tonic, minor);
       const sourceMatch = /^svp-n(\d+)-(\d+)-p\d+-v\d+-o\d+-m\d+-s\d+$/u.exec(item.getAttribute('id') || '');
       const previous = events.at(-1);
+      const tuplets = children(child(item, "notations") ?? document.createElement("div"), "tuplet").map((tuplet) => tuplet.getAttribute("type"));
       events.push({
-        // Chord members share the onset of the note before them and are stacked above it.
-        x: chord && previous ? previous.x : cursor,
+        // Chord members share the onset of the note before them and are stacked above it. Rounding keeps triplet onsets
+        // equal across parts, whatever order their thirds were summed in.
+        x: chord && previous ? previous.x : Math.round(cursor * 1e6) / 1e6,
         chordIndex: chord && previous ? (previous.chordIndex ?? 0) + 1 : 0,
         duration,
         rest,
@@ -119,6 +121,8 @@ function parseMeasure(measure, divisions, warnings, partName, tonic, minor) {
         sourceNoteIndex: sourceMatch ? Number(sourceMatch[2]) : null,
         ties: [...children(item, "tie"), ...children(child(item, "notations") ?? document.createElement("div"), "tied")].map((tie) => tie.getAttribute("type")),
         beams: Object.fromEntries(children(item, "beam").map((beam) => [Number(beam.getAttribute("number")), beam.textContent.trim()])),
+        tupletStart: tuplets.includes("start"),
+        tupletStop: tuplets.includes("stop"),
         chord,
       });
       if (!chord) cursor += duration;
@@ -340,6 +344,21 @@ function drawBeamedLines(svg, drawn, y) {
   }
 }
 
+// A triplet group gets a small bracket above it with a 3 in the middle, clear of ties and high octave dots.
+function drawTuplets(svg, drawn, y) {
+  let run = null;
+  for (const item of drawn) {
+    if (item.event.tupletStart) run = [item];
+    else if (run) run.push(item);
+    if (!item.event.tupletStop || !run) continue;
+    const highOctaveDots = Math.max(0, ...run.map(({ event }) => event.pitch?.octaveShift ?? 0));
+    const top = y - 38 - highOctaveDots * 5, left = run[0].x - 7, right = item.x + 7, middle = (left + right) / 2;
+    el("path", { d: `M ${left} ${top + 4} V ${top} H ${middle - 6} M ${middle + 6} ${top} H ${right} V ${top + 4}`, class: "jianpu-tuplet" }, svg);
+    text(svg, "3", { x: middle, y: top + 4, "text-anchor": "middle", class: "jianpu-tuplet-number" });
+    run = null;
+  }
+}
+
 function drawTie(svg, x1, x2, y, octaveShift = 0) {
   if (x2 <= x1 + 2) return;
   const rise = Math.min(18, Math.max(8, (x2 - x1) * 0.08));
@@ -387,7 +406,7 @@ export async function renderJianpu(xml, container, {
   const pageCount = Math.max(1, Math.ceil(systems.length / systemsPerPage));
   const svgs = [];
   const eventPositions = new Map();
-  const styleText = `.jianpu-note{font-size:24px;fill:#111}.jianpu-lyric{font-size:${safeLyricFontSize}px;fill:#333}.jianpu-rhythm,.jianpu-tie{stroke:#111;stroke-width:1.5;fill:none}.jianpu-sustain{font-size:20px;fill:#111}.jianpu-dot,.jianpu-octave-dot{fill:#111}.jianpu-bar{stroke:#888;stroke-width:1}.jianpu-label{font-size:14px;fill:#222}.jianpu-system-change{font-size:12px;fill:#444}.jianpu-annotation{fill:#4b5563}.jianpu-measure{font-size:12px;fill:#777}.jianpu-page{display:block;max-width:100%;height:auto;margin:0 auto 18px}@media print{@page{size:A4 portrait;margin:10mm}.jianpu-page{width:190mm;height:auto;max-width:none;margin:0;break-after:page;page-break-after:always}.jianpu-page:last-of-type{break-after:auto;page-break-after:auto}}`;
+  const styleText = `.jianpu-note{font-size:24px;fill:#111}.jianpu-lyric{font-size:${safeLyricFontSize}px;fill:#333}.jianpu-rhythm,.jianpu-tie{stroke:#111;stroke-width:1.5;fill:none}.jianpu-tuplet{stroke:#111;stroke-width:1;fill:none}.jianpu-tuplet-number{font-size:11px;font-style:italic;fill:#111}.jianpu-sustain{font-size:20px;fill:#111}.jianpu-dot,.jianpu-octave-dot{fill:#111}.jianpu-bar{stroke:#888;stroke-width:1}.jianpu-label{font-size:14px;fill:#222}.jianpu-system-change{font-size:12px;fill:#444}.jianpu-annotation{fill:#4b5563}.jianpu-measure{font-size:12px;fill:#777}.jianpu-page{display:block;max-width:100%;height:auto;margin:0 auto 18px}@media print{@page{size:A4 portrait;margin:10mm}.jianpu-page{width:190mm;height:auto;max-width:none;margin:0;break-after:page;page-break-after:always}.jianpu-page:last-of-type{break-after:auto;page-break-after:auto}}`;
   for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
     const pageSystems = systems.slice(pageIndex * systemsPerPage, (pageIndex + 1) * systemsPerPage);
     const pageHeight = maxPageHeight;
@@ -438,6 +457,7 @@ export async function renderJianpu(xml, container, {
             if (!event.chord) drawn.push({ event, x: x + 4 });
           }
           drawBeamedLines(svg, drawn, y);
+          drawTuplets(svg, drawn, y);
         }
       }
     });
