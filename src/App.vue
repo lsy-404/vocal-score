@@ -224,7 +224,7 @@ onBeforeUnmount(()=>{clearTimeout(scheduled);renderController?.abort();window.re
 <template>
   <header class="topbar">
     <a class="brand" href="./" :aria-label="t('织音机首页')"><img class="brand-logo" :src="logoUrl" alt="" width="30" height="30"><span>{{ t('织音机') }}</span></a>
-    <a class="main-menu-link fluent-button fluent-button--subtle" href="/" :aria-label="t('返回 Tiny Projects 主菜单')"><span aria-hidden="true">←</span><span class="main-menu-label">{{ t('返回主菜单') }}</span></a>
+    <a class="main-menu-link fluent-button fluent-button--subtle" href="/" :aria-label="t('返回 Tiny Projects 主菜单')"><span aria-hidden="true">←</span><span class="main-menu-label">{{ t('返回主菜单') }}</span><span class="main-menu-short" aria-hidden="true">{{ t('主菜单') }}</span></a>
     <button id="theme-button" class="fluent-button fluent-button--subtle" :aria-pressed="dark" :aria-label="t(dark?'切换浅色主题':'切换深色主题')" @click="dark=!dark">{{ t(dark?'浅色':'深色') }}</button>
     <LanguagePicker/>
   </header>

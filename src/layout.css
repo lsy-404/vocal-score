@@ -13,6 +13,7 @@ input,select{min-width:0}
 .brand{display:flex;align-items:center;gap:10px;color:var(--fluent-text);font-size:17px;font-weight:600;text-decoration:none}
 .brand-logo{display:block;border-radius:7px}
 .main-menu-link{display:inline-flex;align-items:center;gap:6px;margin-right:auto;padding:0 9px;white-space:nowrap;text-decoration:none}
+.main-menu-short{display:none}
 .topbar .fluent-button{min-height:30px;font-size:12px;box-shadow:none}
 .language-picker select{width:104px;min-height:30px;font-size:12px}
 
@@ -142,6 +143,7 @@ main{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0;paddin
   .language-picker select{width:90px}
   .main-menu-link{padding:0 8px}
   .main-menu-label{display:none}
+  .main-menu-short{display:inline}
   .workspace,.workspace.sidebar-collapsed{display:block}
   .sidebar,.sidebar-collapsed .sidebar{position:fixed;z-index:20;top:52px;bottom:0;left:0;width:min(86vw,340px);padding:10px;box-shadow:8px 0 30px rgb(0 0 0 / .15);transform:translateX(-105%);transition:transform .2s ease}
   .workspace.sidebar-open .sidebar{transform:translateX(0)}

@@ -24,6 +24,7 @@ const catalog = {
 const aliases = {
   'zh-CN': {
     '正在生成 PDF…': '正在生成 PDF…',
+    '主菜单': '主菜单',
     '合并连续音符': '合并连续音符', '不合并': '不合并', '低 · 同音延长': '低 · 同音延长', '中 · 含元音续唱': '中 · 含元音续唱', '高 · 含短装饰音': '高 · 含短装饰音', '{count} 个续唱音符并入前一字': '{count} 个续唱音符并入前一字',
     'lyricEditor.writeTyped': '按原文写入', 'lyricEditor.writePinyin': '汉字写成拼音', 'lyricEditor.writeHanzi': '写成汉字', 'lyricEditor.locatedCount': '已定位 {located}/{phrases} 句 · 替换 {notes} 个音符', 'lyricEditor.notFound': '未在现有歌词中找到', 'lyricEditor.occurrence': '第 {index} 处，共 {count} 处',
     '还有 {count} 条提示': '还有 {count} 条提示',
@@ -101,6 +102,7 @@ const aliases = {
   },
   en: {
     '正在生成 PDF…': 'Generating PDF…',
+    '主菜单': 'Main menu',
     '合并连续音符': 'Join consecutive notes', '不合并': 'Off', '低 · 同音延长': 'Low · same-pitch extensions', '中 · 含元音续唱': 'Medium · plus repeated vowels', '高 · 含短装饰音': 'High · plus short ornaments', '{count} 个续唱音符并入前一字': '{count} continuation notes folded into the previous syllable',
     'lyricEditor.writeTyped': 'Write as pasted', 'lyricEditor.writePinyin': 'Write Chinese as pinyin', 'lyricEditor.writeHanzi': 'Write Chinese characters', 'lyricEditor.locatedCount': 'Found {located} of {phrases} phrases · {notes} notes to replace', 'lyricEditor.notFound': 'Not found in the current lyrics', 'lyricEditor.occurrence': 'Match {index} of {count}',
     '还有 {count} 条提示': '{count} more notices',
@@ -178,6 +180,7 @@ const aliases = {
   },
   ja: {
     '正在生成 PDF…': 'PDFを生成中…',
+    '主菜单': 'メニュー',
     '合并连续音符': '連続するノートを結合', '不合并': '結合しない', '低 · 同音延长': '低 · 同じ音高の延長', '中 · 含元音续唱': '中 · 母音の続きも', '高 · 含短装饰音': '高 · 短い装飾音も', '{count} 个续唱音符并入前一字': '{count} 個の続きのノートを前の音節にまとめました',
     'lyricEditor.writeTyped': '入力どおりに書き込む', 'lyricEditor.writePinyin': '漢字をピンインで書き込む', 'lyricEditor.writeHanzi': '漢字で書き込む', 'lyricEditor.locatedCount': '{phrases} 句中 {located} 句を検出 · {notes} ノートを置換', 'lyricEditor.notFound': '現在の歌詞に見つかりません', 'lyricEditor.occurrence': '{count} 件中 {index} 件目',
     '还有 {count} 条提示': 'ほか {count} 件のお知らせ',
@@ -255,6 +258,7 @@ const aliases = {
   },
   ko: {
     '正在生成 PDF…': 'PDF 생성 중…',
+    '主菜单': '메인 메뉴',
     '合并连续音符': '연속 음표 합치기', '不合并': '합치지 않음', '低 · 同音延长': '낮음 · 같은 음높이 연장', '中 · 含元音续唱': '중간 · 이어 부르는 모음 포함', '高 · 含短装饰音': '높음 · 짧은 꾸밈음 포함', '{count} 个续唱音符并入前一字': '이어 부르는 음표 {count}개를 앞 음절에 합침',
     'lyricEditor.writeTyped': '입력한 그대로 쓰기', 'lyricEditor.writePinyin': '한자를 병음으로 쓰기', 'lyricEditor.writeHanzi': '한자로 쓰기', 'lyricEditor.locatedCount': '{phrases}구 중 {located}구 찾음 · 음표 {notes}개 교체', 'lyricEditor.notFound': '현재 가사에서 찾지 못했습니다', 'lyricEditor.occurrence': '{count}곳 중 {index}번째',
     '还有 {count} 条提示': '알림 {count}개 더 보기',
