@@ -2,15 +2,15 @@
 
 在浏览器本地读取 Synthesizer V 工程，生成带歌词的五线谱与简谱，直接预览和下载 PDF。
 
-开发与构建使用 Node.js 24+：
+在仓库根目录使用 Node.js 22.13 或更新版本与 pnpm 10.34.6：
 
 ```sh
-npm ci
-npm run build
-npm start
+pnpm install --frozen-lockfile
+pnpm build
+pnpm check
 ```
 
-打开终端显示的本地地址。开发时可用 `npm run dev`。界面全部使用 Vue 单文件组件和 Vue I18n；部署时只需将 `dist/` 内的静态文件放到工具的子目录，无需后端。运行依赖和 PDF.js worker 随构建包含，不从 CDN 加载。
+单独开发工具界面时，在仓库根目录运行 `pnpm exec vite apps/vocal-score --config apps/vocal-score/vite.config.js`。门户预览服务器通过 `node test/vocal-score/server.js` 启动。工具使用 Vue 单文件组件和 Vue I18n；生产构建会把静态文件集成到 `dist/projects/vocal-score/`，无需后端。运行依赖、字体与 PDF.js worker 随构建包含，不从 CDN 加载。
 
 功能：
 
@@ -22,13 +22,14 @@ npm start
 - 识别完全相同的重复乐段并提示歌词差异；保留完整的小节和歌词。
 - 根据所选音轨展示多个和弦候选，可选择在谱面标记。匹配度表示音高集合的匹配，不能当作正确率。
 - 可逐音符修改或清空歌词并还原；单独的 `-`、`+` 延长前一个字。粘贴拼音或中文后预览替换，可将汉字转为拼音或以汉字替换拼音，数量匹配后应用，支持撤销。
+- 可直接点选谱面上的标题、页眉、署名、声部名或歌词进行编辑；也可按拼音匹配现有歌词补入汉字，显示匹配位置并处理多音字歧义。
 - 识别音分与音高曲线，达到阈值时按代表偏移修正半音，显示修正前后及残余音分。动态曲线采用中段采样，非线性曲线为近似；滑音、颤音参数作为参数展示。
 - 字体、歌词/标题/页眉字号、每页页眉、首页 by 署名、页码、小节号。
-- PDF.js 主预览与直接下载 PDF，支持 A4、Letter、Legal、A3、A5 和横竖方向；也可导出 MusicXML 与谱面 SVG。
+- PDF.js 连续页面预览与直接下载 PDF，支持 A4、Letter、Legal、A3、A5 和横竖方向；也可导出 MusicXML 与谱面 SVG。
 - 使用 Platform Kit Fluent 的样式包，支持浅色和深色外观。
 
-五线谱支持同轨复音；简谱暂要求每个输出声部内没有重叠音符。转换不生成歌声音频，也不修改磁盘上的原始工程。PDF 逐页使用 220 DPI 图像保留本机字体外观，页面文字不可搜索；需要可编辑或矢量内容时可导出 MusicXML 或 SVG。
+五线谱支持同轨复音；简谱暂要求每个输出声部内没有重叠音符。转换不生成歌声音频，也不修改磁盘上的原始工程。连续 PDF 预览使用 144 DPI 页面图像，下载时按 220 DPI 重新生成；PDF 内文字不可搜索，需要可编辑或矢量内容时可导出 MusicXML 或 SVG。所有工程、原始文件副本和设置仅保存在当前浏览器，不会上传到服务器。
 
-验证：`npm test`。设置 `SVP_SAMPLE_FILES` 为以分号分隔的本地文件路径可增加实际工程验证。浏览器检查为 `test/pdf.browser.mjs`、`test/editor.browser.mjs`、`test/state.browser.mjs`、`test/storage.browser.mjs` 和 `test/jianpu.browser.mjs`，通过外部安装的 Playwright 执行；其模块位置可由 `PLAYWRIGHT_MODULE` 指定。
+完整验证：`pnpm check`。设置 `SVP_SAMPLE_FILES` 为以分号分隔的本地 `.svp` 文件路径可增加真实工程转换验证。浏览器回归脚本位于仓库根目录 `test/vocal-score/`，通过外部安装的 Playwright 执行；使用 `PLAYWRIGHT_MODULE` 指定 Playwright 模块，使用 `PREVIEW_URL` 指向已构建门户中的 `/projects/vocal-score/` 页面。
 
 第三方许可位于 `public/vendor/`，构建后也包含在 `dist/vendor/`。原始用户工程和生成的歌曲文件不进入源代码或部署资源。
