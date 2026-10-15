@@ -201,7 +201,7 @@ function updatePageWindow() {
   }
 
   const center = viewport.scrollTop + viewport.clientHeight / 2;
-  const currentIndex = Math.round((center - firstTop) / pageStep);
+  const currentIndex = Math.floor((center - firstTop) / pageStep);
   setCurrentPage(Math.min(pageSlots.value.length, Math.max(1, currentIndex + 1)));
 }
 
