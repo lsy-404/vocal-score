@@ -3,6 +3,7 @@ import {computed, ref, watch} from 'vue';
 import {pinyin} from 'pinyin-pro';
 import {t} from '../i18n.js';
 import FluentCheckbox from './FluentCheckbox.vue';
+import {applyHanziMatch, matchHanziLyrics} from '../lib/lyric-alignment.js';
 
 const props = defineProps({project: {type: Object, required: true}});
 const emit = defineEmits(['change']);
@@ -11,6 +12,8 @@ const activeTrackId = ref(String(props.project.tracks[0]?.id ?? ''));
 const pastedText = ref('');
 const pasteMode = ref('pinyin');
 const alignAllNotes = ref(false);
+const matchSelection = ref(-1);
+const matchSnapshots = new Map();
 const bulkSnapshots = new Map();
 const batchSnapshots = new Map();
 let noteSnapshots = new WeakMap();
@@ -27,6 +30,17 @@ const hasBatchSnapshot = computed(() => {
   snapshotRevision.value;
   return batchSnapshots.has(trackKey.value);
 });
+const hasMatchSnapshot = computed(() => {
+  snapshotRevision.value;
+  return matchSnapshots.has(trackKey.value);
+});
+const hanziMatch = computed(() => matchHanziLyrics(pastedText.value, notes.value));
+const selectedMatch = computed(() => {
+  if (hanziMatch.value.matches.length === 1) return hanziMatch.value.matches[0];
+  return hanziMatch.value.matches[matchSelection.value] ?? null;
+});
+
+watch([pastedText, pasteMode, activeTrackId], () => { matchSelection.value = -1; });
 
 watch(() => props.project, project => {
   activeTrackId.value = String(project.tracks[0]?.id ?? '');
@@ -90,6 +104,7 @@ function restoreAllLyrics() {
 function textTokens() {
   const text = pastedText.value.trim();
   if (!text) return {tokens: [], error: ''};
+  if (pasteMode.value === 'hanzi-match') return {tokens: [], error: ''};
   if (pasteMode.value === 'hanzi' || pasteMode.value === 'hanzi-text') {
     if (/[A-Za-z]/u.test(text)) return {tokens: [], error: t('lyricEditor.rejectEnglish')};
     if (!/\p{Script=Han}/u.test(text)) return {tokens: [], error: t('lyricEditor.invalidHanzi')};
@@ -102,7 +117,7 @@ const tokens = computed(textTokens);
 const targets = computed(() => notes.value
   .map((note, index) => ({note, index}))
   .filter(({note}) => alignAllNotes.value || (String(note.lyrics ?? '') !== '' && !['-', '+'].includes(String(note.lyrics ?? '')))));
-const exactCount = computed(() => !tokens.value.error && tokens.value.tokens.length > 0 && tokens.value.tokens.length === targets.value.length);
+const exactCount = computed(() => pasteMode.value !== 'hanzi-match' && !tokens.value.error && tokens.value.tokens.length > 0 && tokens.value.tokens.length === targets.value.length);
 const countStatus = computed(() => {
   if (tokens.value.error) return tokens.value.error;
   const params = {targets: targets.value.length, tokens: tokens.value.tokens.length};
@@ -144,6 +159,34 @@ function positionLabel(onset) {
     if (change) meter = change;
   }
   return t('lyricEditor.position', {bar: bar + 1, beat: Math.floor(remaining) + 1});
+}
+
+function applyHanziReplacement() {
+  const track = activeTrack.value;
+  const match = selectedMatch.value;
+  if (!track || !match || hasMatchSnapshot.value) return;
+  matchSnapshots.set(trackKey.value, {
+    noteIndices: [...match.noteIndices],
+    lyrics: match.noteIndices.map(index => String(track.notes[index]?.lyrics ?? ''))
+  });
+  if (!applyHanziMatch(track.notes, match)) {
+    matchSnapshots.delete(trackKey.value);
+    return;
+  }
+  snapshotRevision.value += 1;
+  notify({type: 'match-hanzi-lyrics', count: match.noteIndices.length});
+}
+
+function undoHanziReplacement() {
+  const track = activeTrack.value;
+  const snapshot = matchSnapshots.get(trackKey.value);
+  if (!track || !snapshot) return;
+  snapshot.noteIndices.forEach((index, snapshotIndex) => {
+    if (track.notes[index]) track.notes[index].lyrics = snapshot.lyrics[snapshotIndex] ?? '';
+  });
+  matchSnapshots.delete(trackKey.value);
+  snapshotRevision.value += 1;
+  notify({type: 'undo-hanzi-match'});
 }
 
 function applyReplacement() {
@@ -193,12 +236,27 @@ function undoReplacement() {
           <option value="pinyin">{{ t('lyricEditor.pinyinMode') }}</option>
           <option value="hanzi">{{ t('lyricEditor.hanziMode') }}</option>
           <option value="hanzi-text">{{ t('汉字替换拼音') }}</option>
+          <option value="hanzi-match">{{ t('lyricEditor.hanziMatchMode') }}</option>
         </select>
       </label>
       <div class="lyric-editor__alignment">
         <FluentCheckbox v-model="alignAllNotes" :label="t('lyricEditor.alignAll')" />
       </div>
-      <div class="lyric-editor__preview" aria-live="polite">
+      <div v-if="pasteMode==='hanzi-match'" class="lyric-editor__match" aria-live="polite">
+        <p class="lyric-editor__counts" :class="{'is-mismatch': !hanziMatch.matches.length}">{{ hanziMatch.matches.length ? t('lyricEditor.matchFound', {count: hanziMatch.matches.length, syllables: hanziMatch.characters.length}) : t('lyricEditor.matchNone') }}</p>
+        <label v-if="hanziMatch.matches.length > 1" class="lyric-editor__match-choice" for="lyric-match-choice">{{ t('lyricEditor.chooseMatch') }}
+          <select id="lyric-match-choice" v-model.number="matchSelection" class="fluent-select__control" :aria-label="t('lyricEditor.chooseMatch')">
+            <option :value="-1">{{ t('lyricEditor.chooseMatchPlaceholder') }}</option>
+            <option v-for="(match,index) in hanziMatch.matches" :key="match.noteIndices.join(',')" :value="index">{{ t('lyricEditor.matchAt', {index: match.startNote + 1, count: match.noteIndices.length}) }}</option>
+          </select>
+        </label>
+        <div v-if="selectedMatch" class="lyric-editor__pairs"><span v-for="(character,index) in selectedMatch.characters" :key="index">{{ character }} ← {{ notes[selectedMatch.noteIndices[index]]?.lyrics }}</span></div>
+        <div class="lyric-editor__batch-tools">
+          <button class="fluent-button fluent-button--primary" type="button" :disabled="!selectedMatch || hasMatchSnapshot" @click="applyHanziReplacement">{{ t('lyricEditor.applyMatch') }}</button>
+          <button v-if="hasMatchSnapshot" class="fluent-button fluent-button--subtle" type="button" @click="undoHanziReplacement">{{ t('lyricEditor.undoMatch') }}</button>
+        </div>
+      </div>
+      <div v-if="pasteMode!=='hanzi-match'" class="lyric-editor__preview" aria-live="polite">
         <p class="lyric-editor__counts" :class="{'is-mismatch': !exactCount}">{{ countStatus }}</p>
         <div v-for="row in previewRows" :key="row.index" class="lyric-editor__pair" :class="{'is-extra': !row.note}">
           <span v-if="row.note">{{ row.index + 1 }}. {{ positionLabel(row.note.onset) }} {{ pitchLabel(row.note.pitch) }} · {{ row.note.lyrics || t('lyricEditor.empty') }} → {{ row.token ?? t('lyricEditor.missingLyric') }}</span>
@@ -206,7 +264,7 @@ function undoReplacement() {
         </div>
         <small v-if="previewMore" class="lyric-editor__more">{{ t('lyricEditor.previewMore', {count: 10,total: Math.max(targets.length, tokens.tokens.length)}) }}</small>
       </div>
-      <div class="lyric-editor__batch-tools">
+      <div v-if="pasteMode!=='hanzi-match'" class="lyric-editor__batch-tools">
         <button class="fluent-button fluent-button--primary" type="button" :disabled="!exactCount" @click="applyReplacement">{{ t('lyricEditor.apply') }}</button>
         <button v-if="hasBatchSnapshot" class="fluent-button fluent-button--subtle" type="button" @click="undoReplacement">{{ t('lyricEditor.undoBatch') }}</button>
       </div>
@@ -257,6 +315,10 @@ function undoReplacement() {
 .lyric-editor__pair{padding:3px 0;color:var(--fluent-text,rgb(27 27 27));font-size:11px;overflow-wrap:anywhere}
 .lyric-editor__more{display:block;color:var(--fluent-muted,rgb(93 93 93));margin-top:4px}
 .lyric-editor__batch-tools{display:flex;gap:8px;margin-top:8px}
+.lyric-editor__match{padding:8px 0}
+.lyric-editor__match-choice{display:grid;gap:5px;color:var(--fluent-muted,rgb(93 93 93));font-size:11px}
+.lyric-editor__pairs{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.lyric-editor__pairs span{padding:3px 6px;border-radius:4px;background:var(--fluent-control);font-size:11px}
 .lyric-editor__list{max-height:280px;overflow:auto;border-top:1px solid var(--fluent-border,rgba(0,0,0,.14));scrollbar-width:thin}
 .lyric-editor__note{display:grid;grid-template-columns:minmax(112px,1fr) minmax(100px,1.4fr) auto;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid var(--fluent-border,rgba(0,0,0,.1))}
 .lyric-editor__note-meta{display:grid;color:var(--fluent-muted,rgb(93 93 93));font-size:10px;line-height:1.5}
