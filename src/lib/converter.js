@@ -397,6 +397,48 @@ function lyricXml(lyrics, mode) {
   return `<lyric>${syllabic ? `<syllabic>${syllabic}</syllabic>` : ''}<text>${xml(text)}</text>${mode === 'start' ? '<extend type="start"/>' : ''}</lyric>`;
 }
 
+// How readily a note that only continues the previous syllable is folded into it. A continuation is a "-"/"+" lyric
+// or, from medium up, the previous syllable's vowel sung again ("zou" then "ou"). Low joins "-" notes of the same
+// pitch; medium also folds repeated vowels (joined at the same pitch, drawn as a melisma otherwise) and bridges one
+// grid step; high also absorbs continuations of a sixteenth or less at any interval.
+const NOTE_MERGE = {
+  low: { gap: 0, vowels: false, ornament: 0 },
+  medium: { gap: 1, vowels: true, ornament: 0 },
+  high: { gap: 1, vowels: true, ornament: QUARTER / 4 }
+};
+
+const isExtension = lyrics => lyrics === '-' || lyrics === '+';
+const repeatsVowel = (syllable, lyrics) => /^[aeiouv]+(?:n|ng|r)?$/iu.test(lyrics) && syllable.toLowerCase() !== lyrics.toLowerCase() && syllable.toLowerCase().endsWith(lyrics.toLowerCase());
+
+function mergeConsecutive(notes, level, step) {
+  const rule = NOTE_MERGE[level];
+  if (!rule) return { notes, count: 0 };
+  const kept = [];
+  let count = 0, syllable = '';
+  for (const note of notes) {
+    const previous = kept.at(-1);
+    const gap = previous ? note.start - previous.end : -1;
+    const lyrics = String(note.lyrics ?? '').trim();
+    const continuation = isExtension(lyrics) || (rule.vowels && repeatsVowel(syllable, lyrics));
+    if (!previous || !continuation || gap < 0 || gap > rule.gap * step) {
+      kept.push({ ...note });
+      if (lyrics && !isExtension(lyrics)) syllable = lyrics;
+      continue;
+    }
+    if (note.pitch === previous.pitch || note.duration <= rule.ornament) {
+      previous.end = note.end;
+      previous.duration = previous.end - previous.start;
+    } else if (isExtension(lyrics)) {
+      kept.push({ ...note });
+      continue;
+    } else {
+      kept.push({ ...note, lyrics: '-' });
+    }
+    count += 1;
+  }
+  return { notes: kept, count };
+}
+
 function partitionVoices(notes, step) {
   const lanes = [];
   for (const note of notes) {
@@ -551,11 +593,12 @@ function overlapRatio(notes, signal) {
   return Math.min(1, covered / total);
 }
 
-export function createScore(project, { trackIds, grid = 16, transpose = 0, fifths = 0, title, mergeContinuations = false, modulation = false, pitchAdjustment = { enabled: true, thresholdCents: 50 } } = {}) {
+export function createScore(project, { trackIds, grid = 16, transpose = 0, fifths = 0, title, mergeContinuations = false, modulation = false, noteMerge = 'none', pitchAdjustment = { enabled: true, thresholdCents: 50 } } = {}) {
   if (!project || !Array.isArray(project.tracks)) throw new TypeError('Project must contain parsed tracks.');
   if (![4, 8, 16, 32].includes(grid)) throw new RangeError('Grid must be 4, 8, 16, or 32.');
   if (trackIds !== undefined && !Array.isArray(trackIds)) throw new TypeError('Track IDs must be an array.');
   if (typeof mergeContinuations !== 'boolean') throw new TypeError('mergeContinuations must be a boolean.');
+  if (noteMerge !== 'none' && !NOTE_MERGE[noteMerge]) throw new RangeError('noteMerge must be none, low, medium or high.');
   if (!pitchAdjustment || typeof pitchAdjustment !== 'object' || typeof pitchAdjustment.enabled !== 'boolean' || !finite(pitchAdjustment.thresholdCents) || Number(pitchAdjustment.thresholdCents) <= 0 || Number(pitchAdjustment.thresholdCents) > 1200) throw new RangeError('Pitch adjustment requires an enabled flag and threshold between 0 and 1200 cents.');
   if (!finite(transpose) || !Number.isInteger(Number(transpose)) || !finite(fifths) || !Number.isInteger(Number(fifths)) || Number(fifths) < -7 || Number(fifths) > 7) throw new RangeError('Invalid transposition or key signature.');
   const chosen = trackIds === undefined ? project.tracks : project.tracks.filter(track => trackIds.includes(track.id));
@@ -569,6 +612,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
   const step = QUARTER * 4 / grid;
   const meters = [...project.meters].sort((a, b) => a.index - b.index);
   const tempos = [...project.tempos].sort((a, b) => a.position - b.position);
+  let mergedNoteCount = 0;
   const normalized = selected.map((track, sourceIndex) => {
     let shifted = 0;
     const notes = track.notes.map((note, sourceOrder) => {
@@ -608,7 +652,9 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
       return { ...note, start, duration: end - start, pitch, end, tuning: normalizedTuning, sourceOrder, sourceNoteIndex: note.sourceNoteIndex ?? sourceOrder, sourceTrackIndex: sourceIndex, sourceTrackId: track.id, sourceTrackName: track.name };
     }).sort((a, b) => a.start - b.start || a.sourceOrder - b.sourceOrder);
     if (shifted) warnings.push(`${track.name}: ${shifted} note(s) shifted by grid quantization.`);
-    const lanes = partitionVoices(notes, step).map(lane => lane.map((note, index) => {
+    const merged = mergeConsecutive(notes, noteMerge, step);
+    mergedNoteCount += merged.count;
+    const lanes = partitionVoices(merged.notes, step).map(lane => lane.map((note, index) => {
       const next = lane[index + 1];
       let lyricMode = 'normal';
       const extender = note.lyrics === '+' || note.lyrics === '-';
@@ -766,6 +812,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
     stats: { noteCount: outputTracks.reduce((sum, track) => sum + track.lanes.reduce((total, lane) => total + lane.length, 0), 0), measureCount: measures.length, partCount: parts.length },
     parts: parts.map(({ id, name }) => ({ id, name })),
     keyChanges: keyChanges.map(change => ({ ...change })),
+    noteMerge: { level: noteMerge, mergedCount: mergedNoteCount },
     model,
     merging: { enabled: merging, movedNoteCount: mergeResult.movedNoteCount, sourcePartCount, outputPartCount: outputTracks.length, moves: mergeResult.moves, roles },
     pitchAdjustments: {

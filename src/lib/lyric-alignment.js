@@ -70,6 +70,70 @@ export function matchHanziLyrics(text, notes) {
   return {characters, matches: resolved.map(match => ({...match, characters: [...characters]}))};
 }
 
+const PHRASE_BREAK = /[\r\n，。！？；、,.!?;:：…—~～]+/u;
+
+// Splits pasted text into phrases of tokens. Each token has the value to write and the pinyin readings used to find it.
+function pastedPhrases(text, write) {
+  const phrases = [];
+  for (const part of String(text ?? '').split(PHRASE_BREAK)) {
+    // Chinese text is phrased by spaces too; pinyin keeps spaces between its syllables.
+    const pieces = HAN.test(part) ? part.split(/\s+/u) : [part];
+    for (const piece of pieces) {
+      const tokens = [];
+      for (const word of piece.trim().split(/\s+/u).filter(Boolean)) {
+        if (!HAN.test(word)) { tokens.push({value: word, choices: [normalizePinyin(word)].filter(Boolean), allChoices: [normalizePinyin(word)].filter(Boolean)}); continue; }
+        for (const run of word.split(/(\p{Script=Han}+)/u).filter(Boolean)) {
+          if (!HAN.test(run)) { tokens.push({value: run, choices: [normalizePinyin(run)].filter(Boolean), allChoices: [normalizePinyin(run)].filter(Boolean)}); continue; }
+          const {characters, contextualChoices, allChoices} = hanSyllables(run);
+          const readings = pinyin(run, {type: 'array', toneType: 'none', nonZh: 'removed'});
+          characters.forEach((character, index) => tokens.push({value: write === 'pinyin' ? readings[index] : character, choices: contextualChoices[index], allChoices: allChoices[index]}));
+        }
+      }
+      if (tokens.length) phrases.push({text: piece.trim(), tokens});
+    }
+  }
+  return phrases;
+}
+
+/**
+ * Finds every pasted phrase in the existing lyrics, in order, so that replacements land where the words already are.
+ * write: 'typed' keeps pasted words, 'pinyin' writes readings of Chinese characters, 'hanzi' writes the characters.
+ * Each phrase gets all candidate positions and a default choice: the first one after the previous phrase.
+ */
+export function locatePastedLyrics(text, notes, {write = 'typed', choices = {}} = {}) {
+  const phrases = pastedPhrases(text, write);
+  const source = (notes ?? []).flatMap((note, noteIndex) => sourceSyllables(note?.lyrics, noteIndex));
+  const used = new Set();
+  let after = -1;
+  return phrases.map((phrase, index) => {
+    let candidates = findCandidates(phrase.tokens.map(token => token.choices), source);
+    if (!candidates.length) candidates = findCandidates(phrase.tokens.map(token => token.allChoices), source);
+    const free = candidates.map((candidate, position) => ({candidate, position})).filter(({candidate}) => candidate.noteIndices.every(note => !used.has(note)));
+    const requested = Number.isInteger(choices[index]) ? free.find(({position}) => position === choices[index]) : null;
+    const chosen = requested ?? free.find(({candidate}) => candidate.startNote > after) ?? free[0] ?? null;
+    if (chosen) {
+      chosen.candidate.noteIndices.forEach(note => used.add(note));
+      after = Math.max(...chosen.candidate.noteIndices);
+    }
+    return {...phrase, candidates: candidates.map(candidate => candidate.noteIndices), chosen: chosen ? chosen.position : -1};
+  });
+}
+
+/** Writes located phrases into the notes; returns the number of notes changed. */
+export function applyLocatedLyrics(notes, phrases) {
+  let count = 0;
+  for (const phrase of phrases) {
+    const noteIndices = phrase.candidates[phrase.chosen];
+    if (!noteIndices) continue;
+    noteIndices.forEach((noteIndex, index) => {
+      if (!notes[noteIndex] || phrase.tokens[index] === undefined) return;
+      notes[noteIndex].lyrics = phrase.tokens[index].value;
+      count += 1;
+    });
+  }
+  return count;
+}
+
 export function applyHanziMatch(notes, match) {
   if (!match || !Array.isArray(match.noteIndices) || !Array.isArray(match.characters) || match.noteIndices.length !== match.characters.length) return false;
   const targets = match.noteIndices.map(index => notes?.[index]);
