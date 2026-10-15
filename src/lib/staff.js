@@ -1,0 +1,116 @@
+import { getPaperDimensions } from './pdf.js';
+
+function setTarget(node, note) {
+  if (!node || !note) return;
+  node.setAttribute('data-edit-kind', 'lyric');
+  node.setAttribute('data-track-id', String(note.sourceTrackId));
+  node.setAttribute('data-note-index', String(note.sourceNoteIndex));
+}
+
+function noteIndex(track) {
+  const index = new Map();
+  for (const note of track.notes ?? []) {
+    const key = `${note.voice}:${note.pitch}`;
+    const bucket = index.get(key) ?? [];
+    bucket.push(note);
+    index.set(key, bucket);
+  }
+  for (const bucket of index.values()) bucket.sort((a, b) => a.start - b.start || a.end - b.end);
+  return index;
+}
+
+function findSourceNote(index, voice, pitch, start) {
+  const bucket = index.get(`${voice}:${pitch}`) ?? [];
+  let low = 0;
+  let high = bucket.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (bucket[middle].start <= start + 1e-6) low = middle + 1;
+    else high = middle;
+  }
+  const note = bucket[low - 1];
+  return note && note.end > start - 1e-6 ? note : null;
+}
+
+function tagLyricTargets(osmd, model) {
+  if (!model?.tracks?.length || !Array.isArray(model.measures)) return;
+  const measures = osmd.graphic?.measureList ?? osmd.graphic?.MeasureList;
+  if (!Array.isArray(measures)) return;
+  const trackIndexes = model.tracks.map(noteIndex);
+  measures.forEach((partMeasures, partIndex) => {
+    const track = model.tracks[partIndex];
+    if (!track || !Array.isArray(partMeasures)) return;
+    const index = trackIndexes[partIndex];
+    for (const graphicalMeasure of partMeasures) {
+      for (const entry of graphicalMeasure?.staffEntries ?? []) {
+        for (const graphicalVoice of entry.graphicalVoiceEntries ?? []) {
+          for (const graphicalNote of graphicalVoice.notes ?? []) {
+            const source = graphicalNote.sourceNote;
+            const pitch = (source?.Pitch?.getHalfTone?.() ?? NaN) + 12;
+            const voice = source?.ParentVoiceEntry?.ParentVoice?.VoiceId;
+            const timestamp = source?.getAbsoluteTimestamp?.()?.RealValue;
+            if (!Number.isFinite(pitch) || !Number.isFinite(timestamp)) continue;
+            const start = timestamp * model.divisions * 4;
+            const note = findSourceNote(index, voice, pitch, start);
+            if (!note) continue;
+            for (const node of graphicalNote.getLyricsSVGs?.() ?? []) setTarget(node, note);
+          }
+        }
+      }
+    }
+  });
+}
+
+function tagPartNames(container, model) {
+  if (!model?.tracks?.length) return;
+  const tracksByName = new Map();
+  for (const track of model.tracks) {
+    const name = String(track.name ?? '').trim();
+    if (!name) continue;
+    const matches = tracksByName.get(name) ?? [];
+    matches.push(track);
+    tracksByName.set(name, matches);
+  }
+  for (const node of container.querySelectorAll('svg text')) {
+    const matches = tracksByName.get(node.textContent?.trim());
+    if (matches?.length !== 1) continue;
+    node.setAttribute('data-edit-kind', 'track-name');
+    node.setAttribute('data-track-id', String(matches[0].id));
+  }
+}
+
+export async function renderStaffScore(container, xml, {
+  paperSize = 'a4',
+  orientation = 'portrait',
+  showMeasureNumbers = true,
+  fontFamily = 'Times New Roman, SimSun, serif',
+  lyricFontSize = 14,
+  model,
+} = {}) {
+  if (!container?.replaceChildren) throw new TypeError('A DOM container is required.');
+  if (typeof xml !== 'string') throw new TypeError('MusicXML must be a string.');
+  const Constructor = globalThis.opensheetmusicdisplay?.OpenSheetMusicDisplay;
+  if (!Constructor) throw new Error('OpenSheetMusicDisplay is unavailable.');
+  const osmd = new Constructor(container, {
+    autoResize: false,
+    backend: 'svg',
+    drawTitle: false,
+    drawSubtitle: false,
+    drawComposer: false,
+    drawPartNames: true,
+    drawMeasureNumbers: Boolean(showMeasureNumbers),
+    drawingParameters: 'compacttight',
+  });
+  const dimensions = getPaperDimensions(paperSize, orientation);
+  osmd.setCustomPageFormat(dimensions.width, dimensions.height);
+  osmd.EngravingRules.DefaultFontFamily = fontFamily;
+  osmd.EngravingRules.VexFlowTextFontFamily = fontFamily;
+  osmd.EngravingRules.LyricsHeight = Math.max(10, Math.min(24, Number(lyricFontSize) || 14)) / 10;
+  osmd.EngravingRules.RenderMeasureNumbersOnlyAtSystemStart = false;
+  await osmd.load(xml);
+  osmd.Zoom = 1;
+  osmd.render();
+  tagLyricTargets(osmd, model);
+  tagPartNames(container, model);
+  return { osmd };
+}

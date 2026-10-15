@@ -237,8 +237,12 @@ function pitchXml(midi, fifths) {
   return `<pitch><step>${step}</step>${alter ? `<alter>${alter}</alter>` : ''}<octave>${octave}</octave></pitch>`;
 }
 
+function musicXmlNoteId(note, segmentIndex = 0) {
+  return `svp-n${note.sourceTrackIndex}-${note.sourceNoteIndex}-s${segmentIndex}`;
+}
+
 function noteXml(note, duration, divisions, fifths, tieStart = false, tieStop = false, lyricMode = 'normal') {
-  const parts = ['<note>'];
+  const parts = [`<note id="${musicXmlNoteId(note)}">`];
   parts.push(pitchXml(note.pitch, fifths));
   parts.push(`<duration>${duration}</duration>`);
   const decoded = decomposeDuration(duration, divisions);
@@ -250,7 +254,7 @@ function noteXml(note, duration, divisions, fifths, tieStart = false, tieStop = 
       const tieOut = tieStart || index < decoded.length - 1;
       const ties = `${tieIn ? '<tie type="stop"/>' : ''}${tieOut ? '<tie type="start"/>' : ''}`;
       const notations = `${tieIn ? '<tied type="stop"/>' : ''}${tieOut ? '<tied type="start"/>' : ''}`;
-      return `<note>${pitchXml(note.pitch, fifths)}<duration>${item.duration}</duration>${ties}<voice>${note.voice}</voice><type>${item.type}</type>${'<dot/>'.repeat(item.dots)}${notations ? `<notations>${notations}</notations>` : ''}${index === 0 && lyricMode !== 'continue' ? lyricXml(note.lyrics, lyricMode) : index === 0 && lyricMode === 'continue' ? '<lyric><extend type="continue"/></lyric>' : ''}</note>`;
+      return `<note id="${musicXmlNoteId(note, index)}">${pitchXml(note.pitch, fifths)}<duration>${item.duration}</duration>${ties}<voice>${note.voice}</voice><type>${item.type}</type>${'<dot/>'.repeat(item.dots)}${notations ? `<notations>${notations}</notations>` : ''}${index === 0 && lyricMode !== 'continue' ? lyricXml(note.lyrics, lyricMode) : index === 0 && lyricMode === 'continue' ? '<lyric><extend type="continue"/></lyric>' : ''}</note>`;
     }).join('');
   }
   if (tieStop) parts.push('<tie type="stop"/>');
@@ -600,6 +604,8 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
         voice: laneIndex + 1,
         sourceTrackId: note.sourceTrackId,
         sourceTrackName: note.sourceTrackName,
+        sourceTrackIndex: note.sourceTrackIndex,
+        sourceNoteIndex: note.sourceNoteIndex,
         tuning: {
           ...note.tuning,
           expression: { ...note.tuning.expression },

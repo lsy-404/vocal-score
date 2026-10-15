@@ -103,6 +103,7 @@ function parseMeasure(measure, divisions, warnings, partName, tonic, minor) {
       const type = child(item, "type")?.textContent?.trim() ?? "quarter";
       const dots = children(item, "dot").length;
       const pitch = rest ? null : parsePitch(item, tonic, minor);
+      const sourceMatch = /^svp-n(\d+)-(\d+)-s\d+$/u.exec(item.getAttribute('id') || '');
       events.push({
         x: cursor,
         duration,
@@ -111,6 +112,8 @@ function parseMeasure(measure, divisions, warnings, partName, tonic, minor) {
         dots,
         pitch,
         lyric: lyricText(item),
+        sourceTrackIndex: sourceMatch ? Number(sourceMatch[1]) : null,
+        sourceNoteIndex: sourceMatch ? Number(sourceMatch[2]) : null,
         ties: [...children(item, "tie"), ...children(child(item, "notations") ?? document.createElement("div"), "tied")].map((tie) => tie.getAttribute("type")),
         chord,
       });
@@ -253,7 +256,7 @@ function prepareMeasureLayout(measure, lyricFontSize) {
   return { width: 116 + cursor, slotWidth: cursor, slots: starts };
 }
 
-function drawNote(svg, event, x, y, slotWidth, { fontFamily, lyricFontSize }) {
+function drawNote(svg, event, x, y, slotWidth, { fontFamily, lyricFontSize, sourceTrackIds }) {
   const centerX = x + 4;
   if (event.rest) {
     text(svg, "0", { x: centerX, y, "text-anchor": "middle", class: "jianpu-note", "font-family": fontFamily });
@@ -280,6 +283,12 @@ function drawNote(svg, event, x, y, slotWidth, { fontFamily, lyricFontSize }) {
   for (let i = 0; i < dotCount; i += 1) el("circle", { cx: centerX + 12 + sustainCount * 12 + i * 5, cy: y - 9, r: 1.7, class: "jianpu-dot" }, svg);
   if (event.lyric) {
     const lyric = text(svg, event.lyric, { x: centerX, y: y + Math.max(40, lyricFontSize + 22), "text-anchor": "middle", class: "jianpu-lyric", "font-family": fontFamily, "font-size": lyricFontSize });
+    const trackId = sourceTrackIds?.get(`${event.sourceTrackIndex}:${event.sourceNoteIndex}`);
+    if (trackId) {
+      lyric.setAttribute('data-edit-kind', 'lyric');
+      lyric.setAttribute('data-track-id', trackId);
+      lyric.setAttribute('data-note-index', String(event.sourceNoteIndex));
+    }
     const estimatedWidth = Array.from(event.lyric).reduce((width, char) => width + (char.codePointAt(0) > 255 ? lyricFontSize : lyricFontSize * 0.58), 0);
     if (estimatedWidth > slotWidth - 8) {
       lyric.setAttribute("textLength", String(Math.max(10, slotWidth - 8)));
@@ -322,6 +331,7 @@ export async function renderJianpu(xml, container, {
   showMeasureNumbers = true,
   showPageNumbers = true,
   drawTitle = true,
+  model,
 } = {}) {
   if (typeof xml !== "string") throw new TypeError("MusicXML must be a string.");
   if (!container?.append) throw new TypeError("A DOM container is required.");
@@ -329,6 +339,14 @@ export async function renderJianpu(xml, container, {
   const { parts, names, tonic, minor, beats, beatType, tempo, title } = getSongData(xml);
   const initialState = { tonic, minor, beats, beatType, tempo };
   const measures = makeMeasures(parts, warnings, names, initialState);
+  const sourceTrackIds = new Map();
+  for (const track of model?.tracks ?? []) {
+    for (const note of track.notes ?? []) {
+      if (Number.isInteger(note.sourceTrackIndex) && Number.isInteger(note.sourceNoteIndex)) {
+        sourceTrackIds.set(`${note.sourceTrackIndex}:${note.sourceNoteIndex}`, note.sourceTrackId);
+      }
+    }
+  }
   const margin = 24;
   const pageWidth = Math.max(320, Number(width) || 900);
   const safeLyricFontSize = Math.max(8, Math.min(28, Number(lyricFontSize) || 14));
@@ -365,7 +383,12 @@ export async function renderJianpu(xml, container, {
       const yBottom = yTop + rowHeight - 4;
       for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
         const name = names.get(parts[partIndex].getAttribute("id")) || `声部${partIndex + 1}`;
-        text(svg, name, { x: margin + 4, y: yTop + voiceOffset + partIndex * partSpacing, class: "jianpu-label", "font-family": fontFamily });
+        const label = text(svg, name, { x: margin + 4, y: yTop + voiceOffset + partIndex * partSpacing, class: "jianpu-label", "font-family": fontFamily });
+        const trackId = model?.tracks?.[partIndex]?.id;
+        if (trackId) {
+          label.setAttribute('data-edit-kind', 'track-name');
+          label.setAttribute('data-track-id', String(trackId));
+        }
       }
       for (const measureEntry of system.measures) {
         const { measure, layout, width: widthHere, scale } = measureEntry;
@@ -384,7 +407,7 @@ export async function renderJianpu(xml, container, {
             const slot = layout.slots.get(event.x) ?? { x: 0, width: 44 };
             const x = x0 + 100 + (slot.x + slot.width / 2) * scale - 4;
             const slotWidth = slot.width * scale;
-            drawNote(svg, event, x, y, slotWidth, { fontFamily, lyricFontSize: safeLyricFontSize });
+            drawNote(svg, event, x, y, slotWidth, { fontFamily, lyricFontSize: safeLyricFontSize, sourceTrackIds });
             eventPositions.set(event, { x: x + 4, y, system, partIndex });
           }
         }
