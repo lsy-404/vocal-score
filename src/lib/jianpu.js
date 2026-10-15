@@ -103,7 +103,7 @@ function parseMeasure(measure, divisions, warnings, partName, tonic, minor) {
       const type = child(item, "type")?.textContent?.trim() ?? "quarter";
       const dots = children(item, "dot").length;
       const pitch = rest ? null : parsePitch(item, tonic, minor);
-      const sourceMatch = /^svp-n(\d+)-(\d+)-s\d+$/u.exec(item.getAttribute('id') || '');
+      const sourceMatch = /^svp-n(\d+)-(\d+)-p\d+-v\d+-o\d+-m\d+-s\d+$/u.exec(item.getAttribute('id') || '');
       events.push({
         x: cursor,
         duration,

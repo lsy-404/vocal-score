@@ -37,11 +37,18 @@ function tagLyricTargets(osmd, model) {
   const measures = osmd.graphic?.measureList ?? osmd.graphic?.MeasureList;
   if (!Array.isArray(measures)) return;
   const trackIndexes = model.tracks.map(noteIndex);
-  measures.forEach((partMeasures, partIndex) => {
-    const track = model.tracks[partIndex];
-    if (!track || !Array.isArray(partMeasures)) return;
-    const index = trackIndexes[partIndex];
-    for (const graphicalMeasure of partMeasures) {
+  measures.forEach((measureStaves) => {
+    if (!Array.isArray(measureStaves)) return;
+    measureStaves.forEach((graphicalMeasure, staffIndex) => {
+      const instrumentId = graphicalMeasure?.ParentStaff?.ParentInstrument?.IdString;
+      const partNumber = /^P(\d+)$/u.exec(String(instrumentId ?? ''));
+      const instrumentIndex = partNumber ? Number(partNumber[1]) - 1 : -1;
+      const partIndex = instrumentIndex >= 0 && instrumentIndex < model.tracks.length
+        ? instrumentIndex
+        : measureStaves.length === model.tracks.length ? staffIndex : -1;
+      const track = model.tracks[partIndex];
+      if (!track) return;
+      const index = trackIndexes[partIndex];
       for (const entry of graphicalMeasure?.staffEntries ?? []) {
         for (const graphicalVoice of entry.graphicalVoiceEntries ?? []) {
           for (const graphicalNote of graphicalVoice.notes ?? []) {
@@ -57,11 +64,11 @@ function tagLyricTargets(osmd, model) {
           }
         }
       }
-    }
+    });
   });
 }
 
-function tagPartNames(container, model) {
+function tagPartNames(osmd, model) {
   if (!model?.tracks?.length) return;
   const tracksByName = new Map();
   for (const track of model.tracks) {
@@ -71,11 +78,18 @@ function tagPartNames(container, model) {
     matches.push(track);
     tracksByName.set(name, matches);
   }
-  for (const node of container.querySelectorAll('svg text')) {
-    const matches = tracksByName.get(node.textContent?.trim());
-    if (matches?.length !== 1) continue;
-    node.setAttribute('data-edit-kind', 'track-name');
-    node.setAttribute('data-track-id', String(matches[0].id));
+  const pages = osmd.graphic?.MusicPages ?? osmd.graphic?.musicPages ?? [];
+  for (const page of pages) {
+    for (const system of page.MusicSystems ?? page.musicSystems ?? []) {
+      for (const label of system.Labels ?? system.labels ?? []) {
+        const matches = tracksByName.get(label.Label?.text?.trim());
+        if (matches?.length !== 1) continue;
+        for (const node of label.SVGNode?.querySelectorAll?.('text') ?? []) {
+          node.setAttribute('data-edit-kind', 'track-name');
+          node.setAttribute('data-track-id', String(matches[0].id));
+        }
+      }
+    }
   }
 }
 
@@ -111,6 +125,6 @@ export async function renderStaffScore(container, xml, {
   osmd.Zoom = 1;
   osmd.render();
   tagLyricTargets(osmd, model);
-  tagPartNames(container, model);
+  tagPartNames(osmd, model);
   return { osmd };
 }

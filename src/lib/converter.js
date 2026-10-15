@@ -237,12 +237,14 @@ function pitchXml(midi, fifths) {
   return `<pitch><step>${step}</step>${alter ? `<alter>${alter}</alter>` : ''}<octave>${octave}</octave></pitch>`;
 }
 
-function musicXmlNoteId(note, segmentIndex = 0) {
-  return `svp-n${note.sourceTrackIndex}-${note.sourceNoteIndex}-s${segmentIndex}`;
+function musicXmlNoteId(note, segmentIndex = 0, measureIndex = 0, partIndex = 0, laneIndex = 0, fallbackNoteIndex = 0) {
+  const sourceTrackIndex = Number.isInteger(note.sourceTrackIndex) ? note.sourceTrackIndex : partIndex;
+  const sourceNoteIndex = Number.isInteger(note.sourceNoteIndex) ? note.sourceNoteIndex : fallbackNoteIndex;
+  return `svp-n${sourceTrackIndex}-${sourceNoteIndex}-p${partIndex}-v${laneIndex + 1}-o${fallbackNoteIndex}-m${measureIndex}-s${segmentIndex}`;
 }
 
-function noteXml(note, duration, divisions, fifths, tieStart = false, tieStop = false, lyricMode = 'normal') {
-  const parts = [`<note id="${musicXmlNoteId(note)}">`];
+function noteXml(note, duration, divisions, fifths, tieStart = false, tieStop = false, lyricMode = 'normal', measureIndex = 0, partIndex = 0, laneIndex = 0, fallbackNoteIndex = 0) {
+  const parts = [`<note id="${musicXmlNoteId(note, 0, measureIndex, partIndex, laneIndex, fallbackNoteIndex)}">`];
   parts.push(pitchXml(note.pitch, fifths));
   parts.push(`<duration>${duration}</duration>`);
   const decoded = decomposeDuration(duration, divisions);
@@ -254,7 +256,7 @@ function noteXml(note, duration, divisions, fifths, tieStart = false, tieStop = 
       const tieOut = tieStart || index < decoded.length - 1;
       const ties = `${tieIn ? '<tie type="stop"/>' : ''}${tieOut ? '<tie type="start"/>' : ''}`;
       const notations = `${tieIn ? '<tied type="stop"/>' : ''}${tieOut ? '<tied type="start"/>' : ''}`;
-      return `<note id="${musicXmlNoteId(note, index)}">${pitchXml(note.pitch, fifths)}<duration>${item.duration}</duration>${ties}<voice>${note.voice}</voice><type>${item.type}</type>${'<dot/>'.repeat(item.dots)}${notations ? `<notations>${notations}</notations>` : ''}${index === 0 && lyricMode !== 'continue' ? lyricXml(note.lyrics, lyricMode) : index === 0 && lyricMode === 'continue' ? '<lyric><extend type="continue"/></lyric>' : ''}</note>`;
+      return `<note id="${musicXmlNoteId(note, index, measureIndex, partIndex, laneIndex, fallbackNoteIndex)}">${pitchXml(note.pitch, fifths)}<duration>${item.duration}</duration>${ties}<voice>${note.voice}</voice><type>${item.type}</type>${'<dot/>'.repeat(item.dots)}${notations ? `<notations>${notations}</notations>` : ''}${index === 0 && lyricMode !== 'continue' ? lyricXml(note.lyrics, lyricMode) : index === 0 && lyricMode === 'continue' ? '<lyric><extend type="continue"/></lyric>' : ''}</note>`;
     }).join('');
   }
   if (tieStop) parts.push('<tie type="stop"/>');
@@ -559,7 +561,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
       track.lanes.forEach((lane, laneIndex) => {
         let local = 0;
         const events = [];
-        lane.forEach(note => {
+      lane.forEach((note, fallbackNoteIndex) => {
           const start = Math.max(measure.start, note.start / QUARTER * divisions);
           const end = Math.min(measure.end, note.end / QUARTER * divisions);
           if (end <= start || start >= measure.end || end <= measure.start) return;
@@ -570,7 +572,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
           const after = note.end / QUARTER * divisions > measure.end;
           const lyricMode = before ? (after || note.lyricMode !== 'stop' ? 'continue' : 'stop') : after && note.lyricMode === 'stop' ? 'continue' : note.lyricMode;
           const item = { ...note, voice: laneIndex + 1 };
-          events.push({ at: onset, xml: noteXml(item, duration, divisions, Math.trunc(fifths), after, before, lyricMode) });
+          events.push({ at: onset, xml: noteXml(item, duration, divisions, Math.trunc(fifths), after, before, lyricMode, measureIndex, partIndex, laneIndex, fallbackNoteIndex) });
           local = Math.max(local, onset + duration);
         });
         const measureLength = measure.end - measure.start;
