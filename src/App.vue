@@ -8,7 +8,8 @@ import {analyzeScore,estimateKeys,recommendTranspose} from './lib/analysis.js';
 import {annotateScore,annotateSingers,scoreMetadata,singerPartLabels} from './lib/annotations.js';
 import {decoratePages} from './lib/page-layout.js';
 import {loadDocuments,saveDocument,deleteDocument} from './lib/storage.js';
-import {createPdf,getPaperDimensions} from './lib/pdf.js';
+import {createPdf,getPaperDimensions,warmPdfWorker} from './lib/pdf.js';
+import {warmLyricAlignment} from './lib/lyric-worker.js';
 import {collectScoreTextTargets,applyScoreTextEdit} from './lib/score-text.js';
 import {t,i18n} from './i18n.js';
 import {translateWarning,translateError,groupWarnings} from './ui-messages.js';
@@ -18,7 +19,8 @@ import ScoreTextOverlay from './components/ScoreTextOverlay.vue';
 import ScoreViewer from './components/ScoreViewer.vue';
 import StartupScreen from './components/StartupScreen.vue';
 import logoUrl from './assets/logo.svg';
-const LyricEditor=defineAsyncComponent(()=>import('./components/LyricEditor.vue'));
+const loadLyricEditor=()=>import('./components/LyricEditor.vue');
+const LyricEditor=defineAsyncComponent(loadLyricEditor);
 
 const documents=ref([]),activeId=ref(''),ready=ref(false),busy=ref(false),dragging=ref(false);
 const activeSidebar=ref('files'),sidebarCollapsed=ref(false),mobileSidebarOpen=ref(false);
@@ -101,7 +103,8 @@ function scheduleRender(save=true){
   pending=true;scheduled=setTimeout(renderPending,100);
 }
 
-watch(current,()=>{if(ready.value)scheduleRender();},{deep:true,flush:'sync'});
+// Batched per tick: a lyric correction writes hundreds of notes, and each synchronous run would walk and serialize the whole project.
+watch(current,()=>{if(ready.value)scheduleRender();},{deep:true});
 watch(()=>i18n.global.locale.value,()=>{if(ready.value)scheduleRender(false);});
 watch(dark,value=>{document.body.dataset.fluentTheme=value?'dark':'light';try{localStorage.setItem('svp-vocal-score.theme',value?'dark':'light');}catch{}},{immediate:true});
 
@@ -231,31 +234,36 @@ function preventDrop(event){event.preventDefault();}
 function drop(event){dragging.value=false;importFiles(event.dataTransfer.files);}
 function startupStep(id,label,status='pending',detail=''){const steps=startupSteps.value,index=steps.findIndex(step=>step.id===id),step={id,label,status,detail};if(index<0)steps.push(step);else steps[index]=step;}
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-// Resolves once the current render settles, or after limit ms so a very large score never blocks the start screen.
-function renderSettled(limit){
-  return new Promise(resolve=>{let stop=null,settled=false;const finish=()=>{if(settled)return;settled=true;stop?.();clearTimeout(timer);resolve();};const timer=setTimeout(finish,limit);stop=watch(busy,value=>{if(!value)finish();});if(!busy.value)finish();});
+// One startup step: task resolves to {status, detail} (ok when omitted); a step still running after 10 s lets the user in.
+async function prepare(id,label,task){
+  startupStep(id,label);
+  let settled=false;
+  const finished=Promise.resolve().then(task).then(outcome=>{settled=true;startupStep(id,label,outcome?.status||'ok',outcome?.detail||'');},cause=>{settled=true;startupStep(id,label,'warn',readableError(cause));});
+  await Promise.race([finished,pause(10000)]);
+  if(!settled)startupStep(id,label,'warn',t('仍在准备，可先进入'));
+}
+// Saved projects are restored and engraved after the start screen, behind the usual progress indicator.
+async function restoreDocuments(){
+  try{const records=await loadDocuments();documents.value=records.map(record=>({...record,settings:{...defaults(),...record.settings},selected:new Set(record.selected),chordChoices:new Map(record.chordChoices)}));activeId.value=documents.value[0]?.id||'';storageMessage(documents.value.length?'已保存在此浏览器':'文件和设置保存在当前浏览器');}
+  catch{storageMessage('无法读取浏览器存储；请检查浏览器的数据权限。',true);}
+  ready.value=true;
+  if(current.value)scheduleRender(false);
 }
 onMounted(async()=>{
   window.addEventListener('dragover',preventDrop);window.addEventListener('drop',preventDrop);
+  // The start screen prepares what the page needs to work: the engraving engine, fonts, the lyric editor's code and both workers.
   const engine=Boolean(globalThis.opensheetmusicdisplay?.OpenSheetMusicDisplay);
   startupStep('engine',t('加载制谱引擎'),engine?'ok':'warn',engine?'':t('五线谱暂不可用，简谱仍可使用'));
-  startupStep('fonts',t('准备字体'));
-  await Promise.race([document.fonts?.ready,pause(3000)]);
-  startupStep('fonts',t('准备字体'),'ok');
-  startupStep('storage',t('恢复浏览器中的工程'));
-  try{const records=await loadDocuments();documents.value=records.map(record=>({...record,settings:{...defaults(),...record.settings},selected:new Set(record.selected),chordChoices:new Map(record.chordChoices)}));activeId.value=documents.value[0]?.id||'';storageMessage(documents.value.length?'已保存在此浏览器':'文件和设置保存在当前浏览器');startupStep('storage',t('恢复浏览器中的工程'),'ok',t('{count} 个工程',{count:documents.value.length}));}
-  catch{storageMessage('无法读取浏览器存储；请检查浏览器的数据权限。',true);startupStep('storage',t('恢复浏览器中的工程'),'warn',t('无法读取浏览器存储；请检查浏览器的数据权限。'));}
-  const worker=typeof Worker==='function';
-  startupStep('export',t('检查 PDF 导出'),worker?'ok':'warn',worker?'':t('此浏览器无法在后台生成 PDF'));
-  ready.value=true;
-  if(current.value){
-    const label=t('排版《{title}》',{title:current.value.title||current.value.name});
-    startupStep('render',label);scheduleRender(false);await renderSettled(15000);
-    startupStep('render',label,error.value||busy.value?'warn':'ok',error.value||(busy.value?t('仍在排版，可先进入'):''));
-  }
+  await Promise.all([
+    prepare('fonts',t('准备字体'),()=>Promise.race([document.fonts?.ready,pause(3000)]).then(()=>null)),
+    prepare('editor',t('加载歌词编辑器'),loadLyricEditor),
+    prepare('lyrics',t('准备歌词匹配 Worker'),()=>warmLyricAlignment().then(inWorker=>inWorker?null:{status:'warn',detail:t('此浏览器不支持 Worker，歌词匹配在主线程运行')})),
+    prepare('pdf',t('准备 PDF 导出 Worker'),()=>warmPdfWorker().then(inWorker=>inWorker?null:{status:'warn',detail:t('此浏览器无法在后台生成 PDF')}))
+  ]);
   startupReady.value=true;
   await pause(matchMedia('(prefers-reduced-motion: reduce)').matches?0:450);
   startupVisible.value=false;
+  await restoreDocuments();
 });
 onBeforeUnmount(()=>{clearTimeout(scheduled);renderController?.abort();window.removeEventListener('dragover',preventDrop);window.removeEventListener('drop',preventDrop);});
 </script>

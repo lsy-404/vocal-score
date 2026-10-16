@@ -81,6 +81,17 @@ function loadSvgImage(svg, title) {
   });
 }
 
+/** Loads the PDF worker and its jsPDF module once, so the first download does not wait for them; false without workers. */
+export function warmPdfWorker() {
+  if (typeof Worker !== 'function') return Promise.resolve(false);
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./pdf.worker.js', import.meta.url), {type: 'module'});
+    worker.onmessage = () => { worker.terminate(); resolve(true); };
+    worker.onerror = event => { worker.terminate(); reject(new Error(event.message || 'Unable to start the PDF worker.')); };
+    worker.postMessage({type: 'ping'});
+  });
+}
+
 export async function createPdf(svgPages, {
   paperSize = 'a4',
   orientation = 'portrait',

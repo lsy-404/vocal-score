@@ -217,15 +217,3 @@ export function alignLyricsToTracks(text, tracks, {write = 'typed'} = {}) {
   tokens.forEach((token, index) => { if (token.optional && token.status === 'none' && tokens[index - 1].status !== 'none') token.status = tokens[index - 1].status; });
   return {tokens, voices, changes: [...changes.values()]};
 }
-
-/** Writes aligned corrections into the tracks; returns how many notes changed. */
-export function applyAlignedLyrics(tracks, changes) {
-  let count = 0;
-  for (const change of changes) {
-    const note = tracks[change.trackIndex]?.notes?.[change.noteIndex];
-    if (!note) continue;
-    note.lyrics = change.to;
-    count += 1;
-  }
-  return count;
-}

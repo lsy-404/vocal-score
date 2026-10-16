@@ -3,6 +3,7 @@ import {jsPDF} from 'jspdf';
 let pdf,dimensions,orientation;
 self.onmessage=({data})=>{
   try{
+    if(data.type==='ping'){self.postMessage({type:'ready'});return;}
     if(data.type==='start'){
       dimensions=data.dimensions;orientation=data.orientation;
       pdf=new jsPDF({orientation,unit:'mm',format:[dimensions.width,dimensions.height],compress:true});

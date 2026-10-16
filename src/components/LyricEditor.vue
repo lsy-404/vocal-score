@@ -1,10 +1,10 @@
 <script setup>
 // Lyrics: paste the correct lyric once — in any order, with any paragraphs and line breaks — and every voice is
 // corrected where it sings it. Below, the selected voice's notes can be edited one by one.
-import {computed, nextTick, ref, watch} from 'vue';
+import {computed, nextTick, ref, shallowRef, watch} from 'vue';
 import {t} from '../i18n.js';
 import MarkedTextarea from './MarkedTextarea.vue';
-import {alignLyricsToTracks, applyAlignedLyrics} from '../lib/lyric-alignment.js';
+import {alignLyrics, applyAlignedLyrics} from '../lib/lyric-worker.js';
 
 const QUARTER = 705600000;
 const PITCH_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
@@ -46,14 +46,27 @@ function beatsLabel(duration) {
   return t('lyricEditor.beats', {beats: fraction === undefined ? String(Number(beats.toFixed(2))) : `${whole || !fraction ? whole : ''}${fraction}`});
 }
 
-// Correcting with a pasted lyric. Alignment follows the text a moment after typing stops.
+// Correcting with a pasted lyric. Alignment runs in a worker a moment after typing stops; a result counts only while the
+// text, the write mode and every voice's lyrics are still the ones it was computed from.
 const text = ref('');
 const settled = ref('');
 const writeMode = ref('typed');
 let timer = 0;
 watch(text, value => { clearTimeout(timer); timer = setTimeout(() => { settled.value = value; }, 150); });
-const result = computed(() => { revision.value; return settled.value.trim() ? alignLyricsToTracks(settled.value, tracks.value, {write: writeMode.value}) : null; });
-const current = computed(() => (result.value && settled.value === text.value ? result.value : null));
+const lyricsKey = computed(() => tracks.value.map(track => track.notes.map(note => String(note.lyrics ?? '')).join('\u0001')).join('\u0002'));
+const result = shallowRef(null);
+let request = 0;
+watch([settled, writeMode, lyricsKey], async ([value, write, key]) => {
+  const id = ++request;
+  if (!value.trim()) { result.value = null; return; }
+  try {
+    const aligned = await alignLyrics(value, tracks.value, {write});
+    if (aligned && id === request) result.value = {...aligned, text: value, write, key};
+  } catch {
+    if (id === request) result.value = null;
+  }
+}, {immediate: true});
+const current = computed(() => { const value = result.value; return value && value.text === text.value && value.write === writeMode.value && value.key === lyricsKey.value ? value : null; });
 const counts = computed(() => Object.fromEntries(LEGEND.map(([status]) => [status, current.value?.tokens.filter(token => token.status === status).length ?? 0])));
 const spans = computed(() => {
   const value = text.value;
@@ -187,7 +200,7 @@ function barsOf(voice) {
         <p class="lyric-editor__caret" aria-live="polite">{{ caretInfo || t('lyricEditor.caretHint') }}</p>
         <ul class="lyric-editor__voices">
           <li v-for="voice in voices" :key="voice.trackId">
-            <strong>{{ voice.name }}</strong>
+            <strong>{{ tracks[voice.trackIndex]?.name ?? voice.name }}</strong>
             <span>{{ t('lyricEditor.voiceSummary', {changed: voice.changed, matched: voice.matched, syllables: voice.syllables}) }}</span>
             <span v-if="voice.uncovered" class="lyric-editor__uncovered">{{ t('lyricEditor.uncovered', {count: voice.uncovered}) }}<button v-for="item in barsOf(voice).slice(0, 10)" :key="item.bar" type="button" @click="showNote(voice.trackIndex, item.noteIndex)">{{ item.bar }}</button><template v-if="barsOf(voice).length > 10">…</template></span>
           </li>
