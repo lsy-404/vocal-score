@@ -39,7 +39,7 @@ export default {
     const meters = list(source.time_signatures).length
       ? source.time_signatures.map(item => ({ index: item?.bar_position ?? 0, numerator: item?.beat_per_bar, denominator: item?.beat_unit }))
       : [{ index: 0, numerator: source.beat_per_bar ?? 4, denominator: source.beat_unit ?? 4 }];
-    const tracks = list(source.tracks).map((track, index) => ({ name: track?.track_name || `Track ${index + 1}`, notes: [] }));
+    const tracks = list(source.tracks).map((track, index) => ({ name: track?.track_name || `Track ${index + 1}`, singer: track?.singer, notes: [] }));
     for (const part of list(source.voice_parts)) {
       const index = Number(part?.track_no ?? 0);
       if (!part || !Number.isInteger(index) || index < 0) continue;

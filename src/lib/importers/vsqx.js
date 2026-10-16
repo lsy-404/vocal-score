@@ -62,9 +62,17 @@ export default {
     const tempos = fromStart(elements(master, 'tempo').map(node => ({ tick: (number(node, 't', 'posTick') || 0) - tickPrefix, bpm: number(node, 'v', 'bpm') / 100 })), 'tick')
       .map(item => ({ position: ticksToBlicks(item.tick, resolution), bpm: item.bpm }));
 
+    // Parts name their singer by bank and program number (vsq4 bs/pc, vsq3 vBS/vPC) in the project's voice table.
+    const voices = elements(elements(root, 'vVoiceTable')[0], 'vVoice');
+    const voiceName = new Map(voices.map(voice => [`${number(voice, 'bs', 'vBS')}:${number(voice, 'pc', 'vPC')}`, value(voice, 'name', 'vVoiceName')]));
+    const singerOf = part => {
+      const singer = elements(part, 'singer')[0];
+      return singer ? voiceName.get(`${number(singer, 'bs', 'vBS')}:${number(singer, 'pc', 'vPC')}`) : voices.length === 1 ? voiceName.values().next().value : undefined;
+    };
     const tracks = elements(root, 'vsTrack').map((track, index) => {
       const notes = [];
       for (const part of [...elements(track, 'vsPart'), ...elements(track, 'musicalPart')]) {
+        const singer = singerOf(part);
         const offset = (number(part, 't', 'posTick') || 0) - tickPrefix;
         const playTime = number(part, 'playTime');
         for (const note of elements(part, 'note')) {
@@ -76,7 +84,7 @@ export default {
             length = Math.min(length, playTime - start);
           }
           const lyric = value(note, 'y', 'lyric') ?? '';
-          notes.push({ onset: ticksToBlicks(offset + start, resolution), duration: ticksToBlicks(length, resolution), pitch: number(note, 'n', 'noteNum'), lyrics: lyric === '-' ? EXTENSION_LYRIC : lyric });
+          notes.push({ onset: ticksToBlicks(offset + start, resolution), duration: ticksToBlicks(length, resolution), pitch: number(note, 'n', 'noteNum'), lyrics: lyric === '-' ? EXTENSION_LYRIC : lyric, singer });
         }
       }
       return { id: `vsqx-track-${index + 1}`, name: value(track, 'name', 'trackName') || `Track ${index + 1}`, notes };

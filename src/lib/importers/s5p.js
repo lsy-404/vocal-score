@@ -21,6 +21,7 @@ export default {
     const tracks = source.tracks.map((track, index) => ({
       order: Number.isFinite(track?.displayOrder) ? track.displayOrder : index,
       name: track?.name || track?.displayName || `Track ${index + 1}`,
+      singer: track?.dbName,
       notes: list(track?.notes).filter(Boolean)
         .map(note => ({ onset: note.onset, duration: note.duration, pitch: note.pitch, lyrics: String(note.lyric ?? '').trim() }))
     })).sort((a, b) => a.order - b.order);

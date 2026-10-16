@@ -68,11 +68,12 @@ function tagLyricTargets(osmd, model) {
   });
 }
 
-function tagPartNames(osmd, model) {
+// Part labels are matched by their drawn text: the part name, or the label it was given (name plus voice bank).
+function tagPartNames(osmd, model, partLabels) {
   if (!model?.tracks?.length) return;
   const tracksByName = new Map();
-  for (const track of model.tracks) {
-    const name = String(track.name ?? '').trim();
+  for (const [index, track] of model.tracks.entries()) {
+    const name = String(partLabels?.[index] ?? track.name ?? '').trim();
     if (!name) continue;
     const matches = tracksByName.get(name) ?? [];
     matches.push(track);
@@ -100,6 +101,7 @@ export async function renderStaffScore(container, xml, {
   fontFamily = 'Times New Roman, SimSun, serif',
   lyricFontSize = 14,
   model,
+  partLabels,
 } = {}) {
   if (!container?.replaceChildren) throw new TypeError('A DOM container is required.');
   if (typeof xml !== 'string') throw new TypeError('MusicXML must be a string.');
@@ -125,6 +127,6 @@ export async function renderStaffScore(container, xml, {
   osmd.Zoom = 1;
   osmd.render();
   tagLyricTargets(osmd, model);
-  tagPartNames(osmd, model);
+  tagPartNames(osmd, model, partLabels);
   return { osmd };
 }

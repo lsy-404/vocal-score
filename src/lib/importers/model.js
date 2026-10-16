@@ -3,12 +3,25 @@
 //
 // Project shape:
 //   { format, title, version, tracks, tempos, meters, warnings, tuningSummary }
-//   tracks: [{ id, name, notes: [{ onset, duration, pitch, lyrics, tuning }], instrument? }]
+//   tracks: [{ id, name, notes: [{ onset, duration, pitch, lyrics, tuning, singer? }], instrument?, singer? }]
 //   onset/duration are in blicks (BLICKS_PER_QUARTER per quarter note); pitch is an integer MIDI note.
 //   tempos: [{ position (blicks), bpm }]; meters: [{ index (measure index), numerator, denominator }].
 //   instrument (optional, instrumental sources): { name, family, order, clef, percussion }, see instruments.js.
+//   singer (optional): the voice bank's display name, on the track and on notes that sing with another one.
 
 export const BLICKS_PER_QUARTER = 705600000;
+
+/** Trimmed voice bank name, or '' when the source names none. */
+export function singerName(value) {
+  return typeof value === 'string' ? value.trim().slice(0, 120) : '';
+}
+
+/** The voice bank most notes sing with, so a track named by its groups still has one name; '' when none is known. */
+export function mostCommonSinger(notes) {
+  const counts = new Map();
+  for (const note of notes) if (note.singer) counts.set(note.singer, (counts.get(note.singer) ?? 0) + 1);
+  return [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
+}
 
 // Lyric that continues the previous syllable; createScore draws it as a melisma extension.
 export const EXTENSION_LYRIC = '-';
@@ -20,6 +33,8 @@ export function emptyTuning() {
     curveMode: null,
     curveRepresentativeCents: 0,
     curveApproximate: false,
+    autoCurvePointCount: 0,
+    autoCurveRepresentativeCents: 0,
     pitchControlCurveCount: 0,
     expression: {},
     systemExpression: {},
@@ -29,7 +44,7 @@ export function emptyTuning() {
 }
 
 export function emptyTuningSummary() {
-  return { nonzeroDetuneNotes: 0, pitchDeltaCurves: 0, pitchDeltaPoints: 0, pitchControlCurves: 0, explicitExpressionNotes: 0, systemExpressionNotes: 0, referenceExpressionNotes: 0 };
+  return { nonzeroDetuneNotes: 0, pitchDeltaCurves: 0, pitchDeltaPoints: 0, pitchControlCurves: 0, explicitExpressionNotes: 0, systemExpressionNotes: 0, referenceExpressionNotes: 0, autoPitchCurves: 0, autoPitchPoints: 0 };
 }
 
 export function ticksToBlicks(ticks, ticksPerQuarter) {
@@ -89,7 +104,8 @@ export function createProject({ format, title = '', version = null, tracks = [],
     for (const note of track?.notes ?? []) {
       const onset = Number(note?.onset), duration = Number(note?.duration), pitch = Number(note?.pitch);
       if (!Number.isFinite(onset) || onset < 0 || !Number.isFinite(duration) || duration <= 0 || !Number.isInteger(pitch) || pitch < 0 || pitch > 127) { dropped += 1; continue; }
-      notes.push({ onset: Math.round(onset), duration: Math.round(duration), pitch, lyrics: String(note.lyrics ?? ''), tuning: note.tuning ?? emptyTuning() });
+      const singer = singerName(note.singer);
+      notes.push({ onset: Math.round(onset), duration: Math.round(duration), pitch, lyrics: String(note.lyrics ?? ''), tuning: note.tuning ?? emptyTuning(), ...(singer ? { singer } : {}) });
     }
     if (dropped) output.warnings.push(`Track ${name}: skipped a note with invalid timing or pitch.`);
     if (!notes.length) return;
@@ -97,7 +113,8 @@ export function createProject({ format, title = '', version = null, tracks = [],
     let id = String(track.id ?? `${format}-track-${index + 1}`);
     while (ids.has(id)) id += '+';
     ids.add(id);
-    output.tracks.push({ id, name, notes, ...(track.instrument ? { instrument: { ...track.instrument } } : {}) });
+    const singer = singerName(track.singer) || mostCommonSinger(notes);
+    output.tracks.push({ id, name, notes, ...(track.instrument ? { instrument: { ...track.instrument } } : {}), ...(singer ? { singer } : {}) });
   });
   output.tempos = tempos.filter(item => Number.isFinite(Number(item?.position)) && Number(item?.bpm) > 0)
     .map(item => ({ position: Math.max(0, Math.round(Number(item.position))), bpm: Number(item.bpm) })).sort((a, b) => a.position - b.position);

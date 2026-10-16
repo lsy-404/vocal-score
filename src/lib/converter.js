@@ -1,4 +1,5 @@
 import { detectKeyChanges } from './modulation.js';
+import { mostCommonSinger, singerName } from './importers/model.js';
 
 export const QUARTER = 705600000;
 
@@ -32,23 +33,30 @@ function pitchExpression(source) {
   return result;
 }
 
-function groupPitchCurve(group, start, end) {
-  const curve = group?.parameters?.pitchDelta;
-  const rawPoints = Array.isArray(curve?.points) ? curve.points : [];
-  const points = rawPoints.filter(point => Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1]))
-    .map(point => [point[0], point[1]])
-    .sort((a, b) => a[0] - b[0]);
-  const mode = typeof curve?.mode === 'string' ? curve.mode : null;
-  if (!points.length || end <= start) {
-    return { pointCount: rawPoints.length, mode, representativeCents: 0, approximate: rawPoints.length > 0 && mode?.toLowerCase() !== 'linear' };
-  }
+// Synthesizer V stores curve points flat ([blick, value, blick, value, …]); [blick, value] pairs are accepted too.
+function curvePoints(curve) {
+  const raw = Array.isArray(curve?.points) ? curve.points : [];
+  const pairs = raw.every(Array.isArray) ? raw.map(point => [point[0], point[1]])
+    : Array.from({ length: raw.length >> 1 }, (_, index) => [raw[index * 2], raw[index * 2 + 1]]);
+  return pairs.filter(([position, value]) => Number.isFinite(position) && Number.isFinite(value)).sort((a, b) => a[0] - b[0]);
+}
+
+// A curve read once per group, so that each note samples it by binary search instead of re-reading every point.
+function pitchCurve(curve) {
+  return { points: curvePoints(curve), mode: typeof curve?.mode === 'string' ? curve.mode : null };
+}
+
+// The median of the curve over the middle 60% of [start, end): transitions at either end of the note do not count.
+function representativeCents({ points, mode }, start, end) {
+  const linear = mode?.toLowerCase() === 'linear';
+  if (!points.length || end <= start) return { pointCount: points.length, mode, representativeCents: 0, approximate: points.length > 0 && !linear };
   const sample = position => {
     if (position <= points[0][0]) return points[0][1];
     if (position >= points.at(-1)[0]) return points.at(-1)[1];
-    let right = 1;
-    while (right < points.length && points[right][0] < position) right += 1;
-    const leftPoint = points[right - 1];
-    const rightPoint = points[right];
+    let low = 1, high = points.length - 1;
+    while (low < high) { const middle = (low + high) >>> 1; if (points[middle][0] < position) low = middle + 1; else high = middle; }
+    const leftPoint = points[low - 1];
+    const rightPoint = points[low];
     if (rightPoint[0] === leftPoint[0]) return rightPoint[1];
     const ratio = (position - leftPoint[0]) / (rightPoint[0] - leftPoint[0]);
     return leftPoint[1] + (rightPoint[1] - leftPoint[1]) * ratio;
@@ -56,10 +64,10 @@ function groupPitchCurve(group, start, end) {
   const samplePositions = Array.from({ length: 17 }, (_, index) => start + (end - start) * (0.2 + 0.6 * index / 16));
   const values = samplePositions.map(sample).sort((a, b) => a - b);
   return {
-    pointCount: rawPoints.length,
+    pointCount: points.length,
     mode,
     representativeCents: values[Math.floor(values.length / 2)],
-    approximate: mode?.toLowerCase() !== 'linear' || samplePositions.some(position => position < points[0][0] || position > points.at(-1)[0])
+    approximate: !linear || samplePositions.some(position => position < points[0][0] || position > points.at(-1)[0])
   };
 }
 
@@ -81,7 +89,9 @@ export function parseSvp(text, fileName = '') {
     pitchControlCurves: 0,
     explicitExpressionNotes: 0,
     systemExpressionNotes: 0,
-    referenceExpressionNotes: 0
+    referenceExpressionNotes: 0,
+    autoPitchCurves: 0,
+    autoPitchPoints: 0
   };
   const library = new Map((Array.isArray(source.library) ? source.library : [])
     .filter(group => group && (group.uuid || group.groupID))
@@ -116,10 +126,19 @@ export function parseSvp(text, fileName = '') {
     for (const { ref, group } of candidates) {
       const offset = Number(ref?.blickOffset ?? 0);
       const pitchOffset = Number(ref?.pitchOffset ?? 0);
+      // A group reference without its own voice bank sings with the track's.
+      const singer = singerName(ref?.database?.name) || singerName(mainRef?.database?.name);
       const rawPitchCurve = group?.parameters?.pitchDelta;
+      const manualCurve = pitchCurve(rawPitchCurve);
       if (rawPitchCurve && Array.isArray(rawPitchCurve.points)) {
         tuningSummary.pitchDeltaCurves += 1;
-        tuningSummary.pitchDeltaPoints += rawPitchCurve.points.length;
+        tuningSummary.pitchDeltaPoints += manualCurve.points.length;
+      }
+      // The pitch Synthesizer V generates itself, in the group's time like pitchDelta; it is reported, never applied.
+      const autoCurve = pitchCurve(ref?.systemPitchDelta);
+      if (autoCurve.points.length) {
+        tuningSummary.autoPitchCurves += 1;
+        tuningSummary.autoPitchPoints += autoCurve.points.length;
       }
       const pitchControlCurveCount = Array.isArray(group?.pitchControls) ? group.pitchControls.length : 0;
       tuningSummary.pitchControlCurves += pitchControlCurveCount;
@@ -140,7 +159,8 @@ export function parseSvp(text, fileName = '') {
         const trimStart = Math.max(onset, Number(ref?.blickAbsoluteBegin ?? onset));
         const trimEnd = Number(ref?.blickAbsoluteEnd) >= 0 ? Math.min(onset + duration, Number(ref.blickAbsoluteEnd)) : onset + duration;
         if (trimEnd <= trimStart) continue;
-        const curve = groupPitchCurve(group, trimStart - offset, trimEnd - offset);
+        const curve = representativeCents(manualCurve, trimStart - offset, trimEnd - offset);
+        const auto = representativeCents(autoCurve, trimStart - offset, trimEnd - offset);
         const rawDetune = note.detune;
         const detuneCents = rawDetune === undefined ? 0 : typeof rawDetune === 'number' && Number.isFinite(rawDetune) ? rawDetune : null;
         if (detuneCents === null) warnings.push(`Track ${track.name || index + 1}: ignored a non-finite note detune.`);
@@ -155,12 +175,15 @@ export function parseSvp(text, fileName = '') {
           duration: trimEnd - trimStart,
           pitch: Number(note.pitch) + (finite(pitchOffset) ? pitchOffset : 0),
           lyrics: String(note.lyrics ?? ''),
+          ...(singer ? { singer } : {}),
           tuning: {
             detuneCents,
             curvePointCount: curve.pointCount,
             curveMode: curve.mode,
             curveRepresentativeCents: curve.representativeCents,
             curveApproximate: curve.approximate,
+            autoCurvePointCount: auto.pointCount,
+            autoCurveRepresentativeCents: auto.representativeCents,
             pitchControlCurveCount,
             expression,
             systemExpression,
@@ -175,7 +198,8 @@ export function parseSvp(text, fileName = '') {
     }
     if (notes.length) {
       notes.sort((a, b) => a.onset - b.onset || a.pitch - b.pitch);
-      tracks.push({ id: String(track.mainGroup?.uuid ?? mainRef?.groupID ?? `track-${index + 1}`), name: String(track.name || `Track ${index + 1}`), notes });
+      const singer = mostCommonSinger(notes);
+      tracks.push({ id: String(track.mainGroup?.uuid ?? mainRef?.groupID ?? `track-${index + 1}`), name: String(track.name || `Track ${index + 1}`), notes, ...(singer ? { singer } : {}) });
     }
   }
 
@@ -561,101 +585,107 @@ function overlapsInterval(index, note) {
     (low < index.intervals.length && index.intervals[low].start < note.end);
 }
 
-function mergeUnits(lanes) {
-  const units = [];
-  for (const lane of lanes) {
-    for (let index = 0; index < lane.length;) {
-      const note = lane[index];
-      const marker = note.lyrics === '+' || note.lyrics === '-';
-      if (note.lyricMode === 'start') {
-        const notes = [note];
-        let end = note.end;
-        let nextIndex = index + 1;
-        while (nextIndex < lane.length) {
-          const next = lane[nextIndex];
-          if (!(next.lyrics === '+' || next.lyrics === '-') || next.start > end) break;
-          notes.push(next);
-          end = Math.max(end, next.end);
-          nextIndex += 1;
-        }
-        units.push({ notes, start: note.start, end, movable: true });
-        index = nextIndex;
-        continue;
-      }
-      if (marker) {
-        let end = note.end;
-        let nextIndex = index + 1;
-        while (nextIndex < lane.length) {
-          const next = lane[nextIndex];
-          if (!(next.lyrics === '+' || next.lyrics === '-') || next.start > end) break;
-          end = Math.max(end, next.end);
-          nextIndex += 1;
-        }
-        units.push({ notes: lane.slice(index, nextIndex), start: note.start, end, movable: false });
-        index = nextIndex;
-        continue;
-      }
-      units.push({ notes: [note], start: note.start, end: note.end, movable: true });
-      index += 1;
-    }
+// Only sung tracks are merged; instrumental tracks keep their own staves.
+const isVocal = track => !track.instrument;
+
+// A phrase is a run of notes with less than a beat of rest between them; it moves to another part whole or not at all.
+// A phrase that opens with an extension continues a syllable left behind in its source, so it stays there.
+function splitPhrases(notes) {
+  const phrases = [];
+  for (const note of notes) {
+    const phrase = phrases.at(-1);
+    if (phrase && note.start - phrase.end < QUARTER) {
+      phrase.notes.push(note);
+      phrase.end = Math.max(phrase.end, note.end);
+    } else phrases.push({ notes: [note], start: note.start, end: note.end, movable: !isExtension(String(note.lyrics ?? '').trim()) });
   }
-  return units.sort((a, b) => a.start - b.start || a.notes[0].sourceOrder - b.notes[0].sourceOrder);
+  return phrases;
 }
 
-function mergeDisjointNotes(tracks) {
+const medianPitch = notes => { const pitches = notes.map(note => note.pitch).sort((a, b) => a - b); return pitches[pitches.length >> 1]; };
+const singersOf = notes => new Set(notes.map(note => note.singer).filter(Boolean));
+
+// true when every voice bank of the source already sings in the target, false when one does not, null when either is unknown.
+function sameSingers(source, target) {
+  const from = singersOf(source), to = singersOf(target);
+  return from.size && to.size ? [...from].every(singer => to.has(singer)) : null;
+}
+
+/**
+ * Decides which earlier part a later vocal track continues, if any. Each candidate describes one earlier vocal part:
+ *   overlapRatio  share of the source's sounding time during which the candidate also sounds (0 = never together)
+ *   blockedShare  share of the source's notes in phrases that overlap the candidate and so stay behind
+ *   pitchDistance semitones between the two parts' median pitches
+ *   sameSinger    true / false / null (unknown voice bank); candidates with another voice bank are already
+ *                 removed unless merging across voice banks is allowed
+ *   order         position of the candidate in the score, 0 for the top part
+ * A candidate qualifies when the two parts sound together for at most `tolerance` of the source's time. A phrase that
+ * overlaps only partly stays behind whole, so up to twice that share of notes may stay; more would split the line over
+ * two staves. Of the qualifying parts the one sounding least together wins, then a known same voice bank, then the
+ * nearer register, then the higher part. Returns null to leave the source as its own part.
+ */
+function chooseMergeTarget(candidates, tolerance) {
+  const singerRank = candidate => (candidate.sameSinger === true ? 0 : candidate.sameSinger === null ? 1 : 2);
+  return candidates
+    .filter(candidate => candidate.overlapRatio <= tolerance && candidate.blockedShare <= tolerance * 2)
+    .sort((a, b) => a.overlapRatio - b.overlapRatio || singerRank(a) - singerRank(b) || a.pitchDistance - b.pitchDistance || a.order - b.order)[0] ?? null;
+}
+
+function mergeDisjointNotes(tracks, { acrossSingers = false, tolerance = 0 } = {}) {
   const outputs = tracks.map((track, sourceIndex) => ({
     ...track,
     sourceIndex,
     notes: track.lanes.flat().sort((a, b) => a.start - b.start || a.sourceOrder - b.sourceOrder),
-    units: mergeUnits(track.lanes)
+    changed: false
   }));
-  const movesByPair = new Map();
+  const moves = [];
   let movedNoteCount = 0;
   for (let sourceIndex = 1; sourceIndex < outputs.length; sourceIndex += 1) {
     const source = outputs[sourceIndex];
-    const targets = outputs.slice(0, sourceIndex).filter(track => track.notes.length);
-    const indexes = targets.map(track => makeIntervalIndex(track.notes));
-    const batchEnd = targets.map(() => -Infinity);
-    const remaining = [];
-    for (const unit of source.units) {
-      if (!unit.movable) {
-        remaining.push(...unit.notes);
-        continue;
-      }
-      let targetIndex = -1;
-      for (let index = 0; index < targets.length; index += 1) {
-        if (batchEnd[index] > unit.start || overlapsInterval(indexes[index], unit)) continue;
-        targetIndex = index;
-        break;
-      }
-      if (targetIndex < 0) {
-        remaining.push(...unit.notes);
-        continue;
-      }
-      const target = targets[targetIndex];
-      target.notes.push(...unit.notes);
-      batchEnd[targetIndex] = unit.end;
-      const key = `${sourceIndex}:${target.sourceIndex}`;
-      const move = movesByPair.get(key) ?? {
-        fromId: source.id,
-        fromName: source.name,
-        toId: target.id,
-        toName: target.name,
-        count: 0
+    if (!isVocal(source) || !source.notes.length) continue;
+    const phrases = splitPhrases(source.notes);
+    const candidates = outputs.slice(0, sourceIndex).filter(target => isVocal(target) && target.notes.length).map((target, order) => {
+      const index = makeIntervalIndex(target.notes);
+      const fitting = [], blocked = [];
+      for (const phrase of phrases) if (phrase.movable) (overlapsInterval(index, phrase) ? blocked : fitting).push(phrase);
+      return {
+        target,
+        order,
+        fitting,
+        overlapRatio: overlapRatio(source.notes, mergedIntervals(target.notes)),
+        blockedShare: blocked.reduce((count, phrase) => count + phrase.notes.length, 0) / source.notes.length,
+        pitchDistance: Math.abs(medianPitch(source.notes) - medianPitch(target.notes)),
+        sameSinger: sameSingers(source.notes, target.notes)
       };
-      move.count += unit.notes.length;
-      movesByPair.set(key, move);
-      movedNoteCount += unit.notes.length;
-    }
-    source.notes = remaining;
-    delete source.units;
+    }).filter(candidate => acrossSingers || candidate.sameSinger !== false);
+    const chosen = candidates.length ? chooseMergeTarget(candidates, tolerance) : null;
+    if (!chosen?.fitting.length) continue;
+    const moving = new Set(chosen.fitting.flatMap(phrase => phrase.notes));
+    chosen.target.notes.push(...moving);
+    source.notes = source.notes.filter(note => !moving.has(note));
+    chosen.target.changed = source.changed = true;
+    moves.push({ fromId: source.id, fromName: source.name, toId: chosen.target.id, toName: chosen.target.name, count: moving.size, kept: source.notes.length });
+    movedNoteCount += moving.size;
   }
-  const outputTracks = outputs.filter(track => track.notes.length).map(track => {
-    delete track.units;
+  // Parts that neither gave nor received notes keep their voices exactly as they were.
+  const outputTracks = outputs.filter(track => track.notes.length).map(({ changed, ...track }) => {
+    if (!changed) return track;
     track.notes.sort((a, b) => a.start - b.start || a.sourceTrackIndex - b.sourceTrackIndex || a.sourceOrder - b.sourceOrder || a.pitch - b.pitch);
     return { ...track, lanes: partitionVoices(track.notes, 0) };
   });
-  return { outputTracks, movedNoteCount, moves: [...movesByPair.values()] };
+  return { outputTracks, movedNoteCount, moves };
+}
+
+// Where a part starts singing with another voice bank than before: [{ start (blicks), singer }], first one excluded.
+function singerChanges(notes) {
+  const changes = [];
+  let current = '';
+  for (const note of [...notes].sort((a, b) => a.start - b.start)) {
+    if (!note.singer || note.singer === current) continue;
+    if (current) changes.push({ start: note.start, singer: note.singer });
+    current = note.singer;
+  }
+  return changes;
 }
 
 function mergedIntervals(notes) {
@@ -683,11 +713,13 @@ function overlapRatio(notes, signal) {
   return Math.min(1, covered / total);
 }
 
-export function createScore(project, { trackIds, grid = 16, transpose = 0, fifths = 0, title, mergeContinuations = false, modulation = false, noteMerge = 'none', preserveOrder = false, triplets = false, pitchAdjustment = { enabled: true, thresholdCents: 50 } } = {}) {
+export function createScore(project, { trackIds, grid = 16, transpose = 0, fifths = 0, title, mergeContinuations = false, mergeAcrossSingers = false, mergeOverlap = 0.05, modulation = false, noteMerge = 'none', preserveOrder = false, triplets = false, pitchAdjustment = { enabled: true, thresholdCents: 50 } } = {}) {
   if (!project || !Array.isArray(project.tracks)) throw new TypeError('Project must contain parsed tracks.');
   if (![4, 8, 16, 32].includes(grid)) throw new RangeError('Grid must be 4, 8, 16, or 32.');
   if (trackIds !== undefined && !Array.isArray(trackIds)) throw new TypeError('Track IDs must be an array.');
   if (typeof mergeContinuations !== 'boolean') throw new TypeError('mergeContinuations must be a boolean.');
+  if (typeof mergeAcrossSingers !== 'boolean') throw new TypeError('mergeAcrossSingers must be a boolean.');
+  if (!finite(mergeOverlap) || Number(mergeOverlap) < 0 || Number(mergeOverlap) > 0.5) throw new RangeError('mergeOverlap must be a share between 0 and 0.5.');
   if (typeof triplets !== 'boolean') throw new TypeError('triplets must be a boolean.');
   if (noteMerge !== 'none' && !NOTE_MERGE[noteMerge]) throw new RangeError('noteMerge must be none, low, medium or high.');
   if (!pitchAdjustment || typeof pitchAdjustment !== 'object' || typeof pitchAdjustment.enabled !== 'boolean' || !finite(pitchAdjustment.thresholdCents) || Number(pitchAdjustment.thresholdCents) <= 0 || Number(pitchAdjustment.thresholdCents) > 1200) throw new RangeError('Pitch adjustment requires an enabled flag and threshold between 0 and 1200 cents.');
@@ -697,21 +729,21 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
   // Instrumental sources are laid out in score order (woodwinds, brass, percussion, keyboards, voices, strings) and never merged.
   const instrumental = chosen.some(track => track.instrument);
   const selected = instrumental && !preserveOrder ? [...chosen].sort((a, b) => (a.instrument?.order ?? 80) - (b.instrument?.order ?? 80)) : chosen;
-  const merging = mergeContinuations && !instrumental;
+  const merging = mergeContinuations && selected.some(isVocal);
   const warnings = [...(project.warnings || [])];
   const step = QUARTER * 4 / grid;
   const meters = [...project.meters].sort((a, b) => a.index - b.index);
   const tempos = [...project.tempos].sort((a, b) => a.position - b.position);
-  // Triplet beats are chosen per part for instruments and across all voices otherwise, so that merging parts never re-times a note.
+  // Triplet beats are chosen per part for instruments and across all voices, so that merging vocal parts never re-times a note.
   const unit = triplets ? TRIPLET_UNIT[grid] : undefined;
   const beats = unit ? quarterBeats(meters, selected.reduce((last, track) => track.notes.reduce((end, note) => Math.max(end, Number(note.onset) + Number(note.duration)), last), 0) + QUARTER) : [];
-  const shared = unit && !instrumental ? tripletBeats(selected.flatMap(track => track.notes), beats, step, unit) : null;
-  const tripletSets = selected.map(track => (unit ? shared ?? tripletBeats(track.notes, beats, step, unit) : NO_TRIPLETS));
+  const shared = unit ? tripletBeats(selected.filter(isVocal).flatMap(track => track.notes), beats, step, unit) : null;
+  const tripletSets = selected.map(track => (!unit ? NO_TRIPLETS : isVocal(track) ? shared : tripletBeats(track.notes, beats, step, unit)));
   // Triplets need a third of the straight tick, so the divisions only grow when a score has them.
   const divisions = tripletSets.some(set => set.size) ? grid * 3 : grid;
   let mergedNoteCount = 0;
   const normalized = selected.map((track, sourceIndex) => {
-    let shifted = 0;
+    let shifted = 0, residual = 0, curved = 0, approximated = new Set();
     const tripletSet = tripletSets[sourceIndex];
     const tripletBeat = position => { if (!tripletSet.size) return null; const index = beatAt(beats, position); return index >= 0 && tripletSet.has(index) ? beats[index] : null; };
     const snap = position => { const beat = tripletBeat(position); return beat === null ? quantize(position, step) : beat + Math.round((position - beat) / unit) * unit; };
@@ -737,6 +769,8 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
         curveMode: tuning.curveMode ?? null,
         curveRepresentativeCents: curve,
         curveApproximate: Boolean(tuning.curveApproximate),
+        autoCurvePointCount: Number(tuning.autoCurvePointCount) || 0,
+        autoCurveRepresentativeCents: finite(tuning.autoCurveRepresentativeCents) ? Number(tuning.autoCurveRepresentativeCents) : 0,
         pitchControlCurveCount: Number(tuning.pitchControlCurveCount) || 0,
         expression: { ...(tuning.expression || {}) },
         systemExpression: { ...(tuning.systemExpression || {}) },
@@ -746,12 +780,18 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
         adjustmentSemitones,
         residualCents: representativeCents - adjustmentSemitones * 100
       };
-      if (pitchAdjustment.enabled && normalizedTuning.curveApproximate && normalizedTuning.curvePointCount) warnings.push(`${track.name}: ${normalizedTuning.curveMode || 'unknown'} pitch curve uses a linear sampling approximation for note adjustment.`);
-      else if (pitchAdjustment.enabled && normalizedTuning.curvePointCount) warnings.push(`${track.name}: pitch curve shape is reduced to one representative value per note for score display.`);
-      if (pitchAdjustment.enabled && normalizedTuning.residualCents) warnings.push(`${track.name}: remaining ${normalizedTuning.residualCents} cent tuning deviation is preserved as metadata, not engraved.`);
+      if (normalizedTuning.curveApproximate && normalizedTuning.curvePointCount) approximated.add(normalizedTuning.curveMode || 'unknown');
+      else if (normalizedTuning.curvePointCount) curved += 1;
+      if (normalizedTuning.residualCents) residual += 1;
       return { ...note, start, duration: end - start, pitch, end, sourceEnd: originalEnd, tuning: normalizedTuning, sourceOrder, sourceNoteIndex: note.sourceNoteIndex ?? sourceOrder, sourceTrackIndex: sourceIndex, sourceTrackId: track.id, sourceTrackName: track.name };
     }).sort((a, b) => a.start - b.start || a.sourceOrder - b.sourceOrder);
     if (shifted) warnings.push(`${track.name}: ${shifted} note(s) shifted by grid quantization.`);
+    // Tuning notices are summed per part: one line per curve mode and one count of notes keeping cents as metadata.
+    if (pitchAdjustment.enabled) {
+      for (const mode of approximated) warnings.push(`${track.name}: ${mode} pitch curve uses a linear sampling approximation for note adjustment.`);
+      if (curved) warnings.push(`${track.name}: pitch curve shape is reduced to one representative value per note for score display.`);
+      if (residual) warnings.push(`${track.name}: ${residual} note(s) keep a remaining tuning deviation as metadata, not engraved.`);
+    }
     const snapped = separateSnapped(notes);
     if (snapped.count) warnings.push(`${track.name}: ${snapped.count} very short note(s) merged into a neighbour at this rhythm grid.`);
     const merged = mergeConsecutive(snapped.notes, noteMerge, step);
@@ -768,7 +808,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
     return { ...track, sourceIndex, lanes, triplets: tripletSet };
   });
   const sourcePartCount = normalized.length;
-  const mergeResult = merging ? mergeDisjointNotes(normalized) : {
+  const mergeResult = merging ? mergeDisjointNotes(normalized, { acrossSingers: mergeAcrossSingers, tolerance: Number(mergeOverlap) }) : {
     outputTracks: normalized,
     movedNoteCount: 0,
     moves: []
@@ -778,10 +818,10 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
   for (const track of outputTracks) {
     if (track.lanes.length > 1) warnings.push(`${track.name}: overlapping notes are rendered as ${track.lanes.length} voices.`);
   }
-  const leadTrack = normalized.find(track => track.lanes.some(lane => lane.length));
+  const leadTrack = normalized.find(track => isVocal(track) && track.lanes.some(lane => lane.length));
   const leadId = leadTrack?.id;
   const leadSignal = mergedIntervals(leadTrack?.lanes.flat() ?? []);
-  const roles = outputTracks.map(track => {
+  const roles = outputTracks.filter(isVocal).map(track => {
     const notes = track.lanes.flat();
     const continuationNotes = notes.filter(note => note.sourceTrackId !== leadId);
     const ratio = overlapRatio(continuationNotes, leadSignal);
@@ -889,6 +929,13 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
       name: track.name,
       clef: clefs[index],
       percussion: clefs[index] === 'percussion',
+      // The voice bank the part opens with, then each place it changes, as a measure index and an offset in divisions.
+      singer: [...track.lanes.flat()].sort((a, b) => a.start - b.start).find(note => note.singer)?.singer ?? track.singer ?? '',
+      singerChanges: singerChanges(track.lanes.flat()).map(change => {
+        const position = Math.round(tick(change.start));
+        const measureIndex = Math.max(0, measures.findIndex(measure => position < measure.end));
+        return { measureIndex, offset: position - measures[measureIndex].start, singer: change.singer };
+      }),
       notes: track.lanes.flatMap((lane, laneIndex) => lane.map(note => ({
         start: Math.round(note.start / QUARTER * divisions),
         end: Math.round(note.end / QUARTER * divisions),
@@ -927,13 +974,19 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
       thresholdCents: Number(pitchAdjustment.thresholdCents),
       adjustedNoteCount: normalized.reduce((count, track) => count + track.lanes.flat().filter(note => note.tuning.adjustmentSemitones !== 0).length, 0),
       approximateNoteCount: normalized.reduce((count, track) => count + track.lanes.flat().filter(note => note.tuning.curvePointCount > 0).length, 0),
+      // Synthesizer V's own pitch is reported for reference only and never changes a note.
+      auto: {
+        noteCount: normalized.reduce((count, track) => count + track.lanes.flat().filter(note => note.tuning.autoCurvePointCount > 0).length, 0),
+        offsetNoteCount: normalized.reduce((count, track) => count + track.lanes.flat().filter(note => Math.abs(note.tuning.autoCurveRepresentativeCents) >= Number(pitchAdjustment.thresholdCents)).length, 0)
+      },
       notes: normalized.flatMap(track => track.lanes.flat().filter(note => note.tuning.adjustmentSemitones !== 0).map(note => ({
         sourceTrackId: note.sourceTrackId,
         sourceNoteIndex: note.sourceNoteIndex,
         fromPitch: note.pitch - note.tuning.adjustmentSemitones,
         toPitch: note.pitch,
         cents: note.tuning.representativeCents,
-        residualCents: note.tuning.residualCents
+        residualCents: note.tuning.residualCents,
+        autoCents: note.tuning.autoCurveRepresentativeCents
       })))
     }
   };

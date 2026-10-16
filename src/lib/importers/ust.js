@@ -8,6 +8,8 @@ const EXTENSIONS = new Set(['-', 'ー']);
 
 const baseName = fileName => String(fileName || '').replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '');
 const blicks = ticks => ticksToBlicks(ticks, TICKS_PER_QUARTER);
+// VoiceDir is a folder, usually "%VOICE%name" under the UTAU voice directory; the voice bank is its last segment.
+const voiceOf = dir => String(dir ?? '').replace(/^%VOICE%/i, '').replace(/[\\/]+$/, '').split(/[\\/]/).at(-1);
 
 function readSections(text) {
   const sections = [];
@@ -71,7 +73,7 @@ export default {
       format: 'UTAU',
       title: setting?.ProjectName || name,
       version: /UST Version\s*([\d.]+)/i.exec(text)?.[1] ?? null,
-      tracks: [{ name: name || setting?.ProjectName || 'UTAU', notes }],
+      tracks: [{ name: name || setting?.ProjectName || 'UTAU', singer: voiceOf(setting?.VoiceDir), notes }],
       tempos: tempos.map(item => ({ position: blicks(item.tick), bpm: item.bpm })),
       warnings
     });

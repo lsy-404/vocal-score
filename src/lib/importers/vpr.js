@@ -9,7 +9,7 @@ const AUDIO_TRACK = 1;
 const baseName = fileName => String(fileName || '').replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '');
 const list = value => Array.isArray(value) ? value : [];
 
-function partNotes(part) {
+function partNotes(part, singer) {
   const offset = Number(part?.pos) || 0;
   const end = Number(part?.duration) > 0 ? Number(part.duration) : Infinity;
   // Notes past the end of a part are muted by the editor.
@@ -17,7 +17,8 @@ function partNotes(part) {
     onset: ticksToBlicks(offset + Number(note.pos), TICKS_PER_QUARTER),
     duration: ticksToBlicks(Math.min(Number(note.duration), end - Number(note.pos)), TICKS_PER_QUARTER),
     pitch: note.number,
-    lyrics: note.lyric === '-' ? EXTENSION_LYRIC : String(note.lyric ?? '')
+    lyrics: note.lyric === '-' ? EXTENSION_LYRIC : String(note.lyric ?? ''),
+    singer
   }));
 }
 
@@ -40,8 +41,11 @@ export default {
     const tempos = global?.isEnabled && global.value > 0 ? [{ position: 0, bpm: global.value / 100 }]
       : list(master.tempo?.events).map(event => ({ position: ticksToBlicks(event?.pos ?? 0, TICKS_PER_QUARTER), bpm: Number(event?.value) / 100 }));
     const meters = list(master.timeSig?.events).map(event => ({ index: event?.bar, numerator: event?.numer, denominator: event?.denom }));
+    // Each part names its voice by component id in the project's voice list.
+    const voices = new Map(list(source.voices).map(voice => [voice?.compID, voice?.name]));
+    const singerOf = part => part?.voice ? voices.get(part.voice.compID) : voices.size === 1 ? voices.values().next().value : undefined;
     const tracks = source.tracks.map((track, index) => track && track.type !== AUDIO_TRACK
-      ? { id: `vpr-track-${index + 1}`, name: track.name || `Track ${index + 1}`, notes: list(track.parts).flatMap(partNotes) }
+      ? { id: `vpr-track-${index + 1}`, name: track.name || `Track ${index + 1}`, notes: list(track.parts).flatMap(part => partNotes(part, singerOf(part))) }
       : null).filter(Boolean);
     const { major, minor, revision } = source.version ?? {};
     const version = major === undefined ? null : [major, minor, revision].filter(item => item !== undefined).join('.');

@@ -2,8 +2,8 @@ function wordsDirection(doc, text, offset = 0) {
   const direction = doc.createElement('direction'); direction.setAttribute('placement', 'above');
   const type = doc.createElement('direction-type');
   const words = doc.createElement('words'); words.textContent = text; words.setAttribute('font-size', '10');
-  type.append(words); direction.append(type);
-  if (offset) {const node = doc.createElement('offset'); node.textContent = String(offset); direction.append(node);}
+  type.appendChild(words); direction.appendChild(type);
+  if (offset) {const node = doc.createElement('offset'); node.textContent = String(offset); direction.appendChild(node);}
   return direction;
 }
 
@@ -31,6 +31,33 @@ export function annotateScore(xml, analysis, {showChords = false, showRepeats = 
     insert(chord.measureIndex, `${chosen} ?`, chord.offset || 0); annotated = true;
   }
   if (annotated) insert(0, translate('和弦为自动推测（?）'));
+  return new XMLSerializer().serializeToString(doc);
+}
+
+/** Display names for the model's parts: a part that knows its voice bank shows it through label(name, singer). */
+export function singerPartLabels(model, label = (name, singer) => `${name} (${singer})`) {
+  return (model?.tracks ?? []).map(track => track.singer ? label(track.name, track.singer) : track.name);
+}
+
+const childElements = (node, ...names) => Array.from(node?.childNodes ?? []).filter(item => item.nodeType === 1 && names.includes(item.localName));
+
+// Writes the given part names and marks each voice bank change above the staff where the new voice bank starts.
+// Uses DOM Level 2 calls only, like the importers, so that it also runs under the test DOM.
+export function annotateSingers(xml, model, labels) {
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length) throw new Error('Unable to annotate invalid MusicXML.');
+  const root = doc.documentElement;
+  const names = childElements(childElements(root, 'part-list')[0], 'score-part').map(part => childElements(part, 'part-name')[0]);
+  const parts = childElements(root, 'part');
+  (model?.tracks ?? []).forEach((track, index) => {
+    if (names[index] && labels[index]) names[index].textContent = labels[index];
+    const measures = childElements(parts[index], 'measure');
+    for (const change of track.singerChanges ?? []) {
+      const measure = measures[change.measureIndex];
+      if (!measure) continue;
+      measure.insertBefore(wordsDirection(doc, change.singer, change.offset), childElements(measure, 'note', 'backup', 'forward')[0] || null);
+    }
+  });
   return new XMLSerializer().serializeToString(doc);
 }
 

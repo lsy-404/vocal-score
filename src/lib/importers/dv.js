@@ -94,8 +94,8 @@ function readSegment(r, features, prefix) {
   const offset = r.int('a segment start') - prefix;
   r.int('a segment length');
   r.string('a segment name');
-  r.string('a voice bank name');
-  const notes = r.list('note', 37, note => readNote(note, features, offset)).filter(Boolean);
+  const singer = r.string('a voice bank name');
+  const notes = r.list('note', 37, note => readNote(note, features, offset)).filter(Boolean).map(note => ({ ...note, singer }));
   // Volume, pitch and breath curves, then one more curve for each of ext3, ext5, ext6 and ext7.
   const curves = 3 + [3, 5, 6, 7].filter(n => features.has(n)).length;
   for (let i = 0; i < curves; i += 1) r.block('a segment curve');
