@@ -137,26 +137,34 @@ export function matchHanziLyrics(text, notes) {
   return {characters, matches: resolved.map(match => ({...match, characters: [...characters]}))};
 }
 
-const PHRASE_BREAK = /[\r\n，。！？；、,.!?;:：…—~～]+/u;
+const PHRASE = /[^\r\n，。！？；、,.!?;:：…—~～]+/gu;
 
-// Splits pasted text into phrases of tokens. Each token has the value to write and the pinyin readings used to find it.
+// Splits pasted text into phrases of tokens. Each token has the value to write, the pinyin readings used to find it, and
+// its [start, end) in the pasted text so the input can be marked where each syllable was typed.
 function pastedPhrases(text, write) {
+  const source = String(text ?? '');
+  const reading = value => [normalizePinyin(value)].filter(Boolean);
   const phrases = [];
-  for (const part of String(text ?? '').split(PHRASE_BREAK)) {
+  for (const part of source.matchAll(PHRASE)) {
     // Chinese text is phrased by spaces too; pinyin keeps spaces between its syllables.
-    const pieces = HAN.test(part) ? part.split(/\s+/u) : [part];
-    for (const piece of pieces) {
+    const words = [...part[0].matchAll(/\S+/gu)].map(word => ({text: word[0], start: part.index + word.index}));
+    for (const piece of HAN.test(part[0]) ? words.map(word => [word]) : [words]) {
       const tokens = [];
-      for (const word of piece.trim().split(/\s+/u).filter(Boolean)) {
-        if (!HAN.test(word)) { tokens.push({value: word, choices: [normalizePinyin(word)].filter(Boolean), allChoices: [normalizePinyin(word)].filter(Boolean)}); continue; }
-        for (const run of word.split(/(\p{Script=Han}+)/u).filter(Boolean)) {
-          if (!HAN.test(run)) { tokens.push({value: run, choices: [normalizePinyin(run)].filter(Boolean), allChoices: [normalizePinyin(run)].filter(Boolean)}); continue; }
-          const {characters, contextualChoices, allChoices} = hanSyllables(run);
-          const readings = pinyin(run, {type: 'array', toneType: 'none', nonZh: 'removed'});
-          characters.forEach((character, index) => tokens.push({value: write === 'pinyin' ? readings[index] : character, choices: contextualChoices[index], allChoices: allChoices[index]}));
+      for (const word of piece) {
+        for (const run of word.text.matchAll(/\p{Script=Han}+|[^\p{Script=Han}]+/gu)) {
+          let start = word.start + run.index;
+          if (!HAN.test(run[0])) { tokens.push({value: run[0], choices: reading(run[0]), allChoices: reading(run[0]), start, end: start + run[0].length}); continue; }
+          const {characters, contextualChoices, allChoices} = hanSyllables(run[0]);
+          const readings = pinyin(run[0], {type: 'array', toneType: 'none', nonZh: 'removed'});
+          characters.forEach((character, index) => {
+            tokens.push({value: write === 'pinyin' ? readings[index] : character, choices: contextualChoices[index], allChoices: allChoices[index], start, end: start + character.length});
+            start += character.length;
+          });
         }
       }
-      if (tokens.length) phrases.push({text: piece.trim(), tokens});
+      if (!tokens.length) continue;
+      const start = piece[0].start, end = piece.at(-1).start + piece.at(-1).text.length;
+      phrases.push({text: source.slice(start, end), tokens, start, end});
     }
   }
   return phrases;
@@ -173,10 +181,12 @@ export function locatePastedLyrics(text, notes, {write = 'typed', choices = {}} 
   const used = new Set();
   let after = -1;
   return phrases.map((phrase, index) => {
+    // via: how the phrase was found — its usual readings, another reading of a polyphonic character, or a near match.
+    let via = 'reading';
     let candidates = findCandidates(phrase.tokens.map(token => token.choices), source);
-    if (!candidates.length) candidates = findCandidates(phrase.tokens.map(token => token.allChoices), source);
+    if (!candidates.length) { via = 'polyphonic'; candidates = findCandidates(phrase.tokens.map(token => token.allChoices), source); }
     // A phrase of four syllables or more may differ in one syllable per four (a typo, or a lyric changed while tuning).
-    if (!candidates.length && phrase.tokens.length >= 4) candidates = alignCandidates(phrase.tokens.map(token => token.allChoices), source, Math.floor(phrase.tokens.length / 4));
+    if (!candidates.length && phrase.tokens.length >= 4) { via = 'approximate'; candidates = alignCandidates(phrase.tokens.map(token => token.allChoices), source, Math.floor(phrase.tokens.length / 4)); }
     const free = candidates.map((candidate, position) => ({candidate, position})).filter(({candidate}) => candidate.noteIndices.every(note => note < 0 || !used.has(note)));
     const requested = Number.isInteger(choices[index]) ? free.find(({position}) => position === choices[index]) : null;
     const chosen = requested ?? free.find(({candidate}) => candidate.startNote > after) ?? free[0] ?? null;
@@ -184,8 +194,24 @@ export function locatePastedLyrics(text, notes, {write = 'typed', choices = {}} 
       chosen.candidate.noteIndices.forEach(note => { if (note >= 0) used.add(note); });
       after = Math.max(...chosen.candidate.noteIndices);
     }
-    return {...phrase, candidates: candidates.map(candidate => candidate.noteIndices), mismatches: candidates.map(candidate => candidate.mismatches), chosen: chosen ? chosen.position : -1};
+    return {...phrase, via: candidates.length ? via : null, candidates: candidates.map(candidate => candidate.noteIndices), mismatches: candidates.map(candidate => candidate.mismatches), chosen: chosen ? chosen.position : -1};
   });
+}
+
+/**
+ * How sure the editor is about where a located phrase goes: 'exact', 'high', 'low', or 'none' when it was not found.
+ * A phrase carries via ('reading' | 'polyphonic' | 'approximate'), its candidates (note indices per position, -1 for a
+ * pasted syllable without a note), the mismatches of each candidate, and the chosen candidate.
+ */
+export function matchLevel(phrase) {
+  if (!phrase || phrase.chosen < 0) return 'none';
+  const candidate = phrase.candidates[phrase.chosen], mismatches = phrase.mismatches[phrase.chosen];
+  // A near match stays high while it differs in at most one syllable in eight and every pasted syllable has a note.
+  if (mismatches) return mismatches * 8 <= candidate.length && !candidate.includes(-1) ? 'high' : 'low';
+  // A short phrase found in several places may sit in the wrong one, and another reading of a polyphonic character is
+  // less certain than the usual one.
+  const ambiguous = phrase.candidates.length > 1 && candidate.length < 3;
+  return phrase.via === 'reading' && !ambiguous ? 'exact' : 'high';
 }
 
 /** Writes located phrases into the notes; returns the number of notes changed. */

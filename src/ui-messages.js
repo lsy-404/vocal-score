@@ -48,6 +48,22 @@ export function translateWarning(warning) {
   return translate(warning, warningPatterns);
 }
 
+/**
+ * Groups converter and engraving notices by the part they name, for the analysis page. Returns [{name, items}] where
+ * items are the raw warnings (translated when shown) and name is '' for notices about the whole score.
+ */
+export function groupWarnings(warnings, partNames) {
+  // Whole-score notices first, then parts in score order. Longer names are tried first so "V3-1" is not filed under "V3";
+  // the SVP reader names parts as "Track <name>".
+  const names = [...new Set(partNames.filter(Boolean))];
+  const longest = [...names].sort((a, b) => b.length - a.length);
+  const groups = new Map([['', []], ...names.map(name => [name, []])]);
+  for (const warning of warnings.map(String)) {
+    groups.get(longest.find(name => warning.startsWith(`${name}: `) || warning.startsWith(`Track ${name}: `)) ?? '').push(warning);
+  }
+  return [...groups].filter(([, items]) => items.length).map(([name, items]) => ({name, items}));
+}
+
 export function translateError(cause) {
   const translated = translate(cause, [...warningPatterns, ...errorPatterns]);
   return translated;
