@@ -2,7 +2,6 @@ import {polyphonic, pinyin} from 'pinyin-pro';
 
 const HAN = /\p{Script=Han}/u;
 const HAN_RUN = /\p{Script=Han}+/gu;
-const LATIN_SYLLABLE = /[a-züv]+[0-5]?/giu;
 const MARKERS = new Set(['-', '+']);
 
 export function normalizePinyin(value) {
@@ -53,186 +52,180 @@ function sourceSyllables(lyric, noteIndex) {
     .map(value => ({choices: [value], character: null, noteIndex}));
 }
 
-// The syllables sung by the notes, without vowels re-sung to continue the previous syllable ("zou" then "ou").
+// Wordless singing ("a", "ha", "m") is often left out of written lyrics.
+const VOCALISE = new Set(['a', 'o', 'e', 'ha', 'ah', 'oh', 'en', 'm', 'n', 'ng', 'hm']);
+
+// The syllables sung by the notes. A vowel that may only continue the previous syllable ("zou" then "ou") and wordless
+// singing are optional: they can take a pasted syllable ("jiao ao" for 骄傲, "a" for 啊) but cost nothing to leave out.
 function sourceSequence(notes) {
   const sequence = [];
   let previous = '';
   (notes ?? []).forEach((note, noteIndex) => {
     for (const item of sourceSyllables(note?.lyrics, noteIndex)) {
       const reading = item.choices[0] ?? '';
-      if (previous && /^[aeiouv]+(?:n|ng|r)?$/u.test(reading) && reading !== previous && previous.endsWith(reading)) continue;
-      sequence.push(item);
+      const resung = previous && /^[aeiouv]+(?:n|ng|r)?$/u.test(reading) && reading !== previous && previous.endsWith(reading);
+      sequence.push(resung || VOCALISE.has(reading) ? {...item, optional: true} : item);
       if (reading) previous = reading;
     }
   });
   return sequence;
 }
 
-// Windows of the source whose syllables match the pasted readings, allowing up to `tolerance` mismatches.
-function findCandidates(choices, source, tolerance = 0) {
-  const matches = [];
-  const seen = new Set();
-  for (let start = 0; start <= source.length - choices.length; start += 1) {
-    const window = source.slice(start, start + choices.length);
-    let mismatches = 0;
-    for (let index = 0; index < window.length && mismatches <= tolerance; index += 1) {
-      if (!window[index].wildcard && !choices[index].some(reading => window[index].choices.includes(reading))) mismatches += 1;
-    }
-    if (mismatches > tolerance) continue;
-    const noteIndices = window.map(item => item.noteIndex);
-    if (new Set(noteIndices).size !== noteIndices.length) continue;
-    const signature = noteIndices.join(',');
-    if (seen.has(signature)) continue;
-    seen.add(signature);
-    matches.push({startNote: noteIndices[0], noteIndices, mismatches});
-  }
-  return matches.sort((a, b) => a.mismatches - b.mismatches);
-}
-
-// Near matches: aligns the pasted readings to the source starting at each syllable, where a different, missing or extra
-// syllable each costs one. noteIndices holds -1 for a pasted syllable that has no note.
-function alignCandidates(choices, source, limit) {
-  const matches = [];
-  const seen = new Set();
-  const same = (token, item) => item.wildcard || choices[token].some(reading => item.choices.includes(reading));
-  for (let start = 0; start < source.length; start += 1) {
-    if (!same(0, source[start])) continue;
-    const width = Math.min(source.length - start, choices.length + limit);
-    const cost = Array.from({length: choices.length + 1}, (_, token) => Array.from({length: width + 1}, (_, item) => (item === 0 ? token : token === 0 ? Infinity : 0)));
-    for (let token = 1; token <= choices.length; token += 1) {
-      for (let item = 1; item <= width; item += 1) {
-        cost[token][item] = Math.min(
-          cost[token - 1][item - 1] + (same(token - 1, source[start + item - 1]) ? 0 : 1),
-          cost[token - 1][item] + 1,
-          cost[token][item - 1] + 1
-        );
-      }
-    }
-    let end = 1;
-    for (let item = 2; item <= width; item += 1) if (cost[choices.length][item] < cost[choices.length][end]) end = item;
-    const mismatches = cost[choices.length][end];
-    if (mismatches > limit) continue;
-    const noteIndices = new Array(choices.length).fill(-1);
-    for (let token = choices.length, item = end; token > 0;) {
-      if (item > 0 && cost[token][item] === cost[token - 1][item - 1] + (same(token - 1, source[start + item - 1]) ? 0 : 1)) { noteIndices[token - 1] = source[start + item - 1].noteIndex; token -= 1; item -= 1; }
-      else if (cost[token][item] === cost[token - 1][item] + 1) token -= 1;
-      else item -= 1;
-    }
-    const placed = noteIndices.filter(index => index >= 0);
-    if (new Set(placed).size !== placed.length) continue;
-    const signature = noteIndices.join(',');
-    if (seen.has(signature)) continue;
-    seen.add(signature);
-    matches.push({startNote: placed[0], noteIndices, mismatches});
-  }
-  return matches.sort((a, b) => a.mismatches - b.mismatches);
-}
-
-export function matchHanziLyrics(text, notes) {
-  const {characters, contextualChoices, allChoices} = hanSyllables(text);
-  if (!characters.length) return {characters: [], matches: []};
-  const source = sourceSequence(notes);
-  const matches = findCandidates(contextualChoices, source);
-  const resolved = matches.length && characters.length > 1 ? matches : findCandidates(allChoices, source);
-  return {characters, matches: resolved.map(match => ({...match, characters: [...characters]}))};
-}
-
-const PHRASE = /[^\r\n，。！？；、,.!?;:：…—~～]+/gu;
-
-// Splits pasted text into phrases of tokens. Each token has the value to write, the pinyin readings used to find it, and
-// its [start, end) in the pasted text so the input can be marked where each syllable was typed.
-function pastedPhrases(text, write) {
+// Syllables of a pasted lyric and where they were typed. Punctuation, spaces and line breaks are not syllables, so
+// paragraphs and line breaks never need to match the score. In "心声/新生" the second spelling rides on the first.
+function lyricSyllables(text) {
   const source = String(text ?? '');
-  const reading = value => [normalizePinyin(value)].filter(Boolean);
-  const phrases = [];
-  for (const part of source.matchAll(PHRASE)) {
-    // Chinese text is phrased by spaces too; pinyin keeps spaces between its syllables.
-    const words = [...part[0].matchAll(/\S+/gu)].map(word => ({text: word[0], start: part.index + word.index}));
-    for (const piece of HAN.test(part[0]) ? words.map(word => [word]) : [words]) {
-      const tokens = [];
-      for (const word of piece) {
-        for (const run of word.text.matchAll(/\p{Script=Han}+|[^\p{Script=Han}]+/gu)) {
-          let start = word.start + run.index;
-          if (!HAN.test(run[0])) { tokens.push({value: run[0], choices: reading(run[0]), allChoices: reading(run[0]), start, end: start + run[0].length}); continue; }
-          const {characters, contextualChoices, allChoices} = hanSyllables(run[0]);
-          const readings = pinyin(run[0], {type: 'array', toneType: 'none', nonZh: 'removed'});
-          characters.forEach((character, index) => {
-            tokens.push({value: write === 'pinyin' ? readings[index] : character, choices: contextualChoices[index], allChoices: allChoices[index], start, end: start + character.length});
-            start += character.length;
-          });
-        }
-      }
-      if (!tokens.length) continue;
-      const start = piece[0].start, end = piece.at(-1).start + piece.at(-1).text.length;
-      phrases.push({text: source.slice(start, end), tokens, start, end});
+  const readings = new Map();
+  for (const run of source.matchAll(HAN_RUN)) {
+    const {contextualChoices, allChoices} = hanSyllables(run[0]);
+    let offset = run.index;
+    [...run[0]].forEach((character, index) => { readings.set(offset, {choices: contextualChoices[index] ?? [], allChoices: allChoices[index] ?? []}); offset += character.length; });
+  }
+  const tokens = [...source.matchAll(/\p{Script=Han}|[A-Za-zÀ-ÿüÜ]+[0-5]?/gu)].map(match => {
+    const reading = readings.get(match.index) ?? {choices: [normalizePinyin(match[0])].filter(Boolean), allChoices: [normalizePinyin(match[0])].filter(Boolean)};
+    return {value: match[0], start: match.index, end: match.index + match[0].length, ...reading, alternativeOf: -1};
+  });
+  // A doubled character (层层叠叠) is often sung once, so the second of a pair costs nothing to leave out.
+  tokens.forEach((token, index) => { token.optional = index > 0 && HAN.test(token.value) && token.value === tokens[index - 1].value; });
+  // The two spellings are the characters next to the slash that read alike: 将心声/新生镌刻 pairs 心声 with 新生.
+  const byStart = new Map(tokens.map((token, index) => [token.start, index]));
+  for (const match of source.matchAll(/(\p{Script=Han}+)\s*[/／]\s*(\p{Script=Han}+)/gu)) {
+    const before = tokens.filter(token => token.start >= match.index && token.end <= match.index + match[1].length);
+    const after = tokens.filter(token => token.start >= match.index + match[0].length - match[2].length && token.end <= match.index + match[0].length);
+    const readsAlike = (left, right) => left.allChoices.some(reading => right.allChoices.includes(reading));
+    for (let length = Math.min(before.length, after.length); length > 0; length -= 1) {
+      const first = before.slice(-length), second = after.slice(0, length);
+      if (!first.every((token, index) => readsAlike(token, second[index]))) continue;
+      second.forEach((token, index) => { tokens[byStart.get(token.start)].alternativeOf = byStart.get(first[index].start); });
+      break;
     }
   }
-  return phrases;
+  return tokens;
 }
 
-/**
- * Finds every pasted phrase in the existing lyrics, in order, so that replacements land where the words already are.
- * write: 'typed' keeps pasted words, 'pinyin' writes readings of Chinese characters, 'hanzi' writes the characters.
- * Each phrase gets all candidate positions and a default choice: the first one after the previous phrase.
- */
-export function locatePastedLyrics(text, notes, {write = 'typed', choices = {}} = {}) {
-  const phrases = pastedPhrases(text, write);
-  const source = sourceSequence(notes);
-  const used = new Set();
-  let after = -1;
-  return phrases.map((phrase, index) => {
-    // via: how the phrase was found — its usual readings, another reading of a polyphonic character, or a near match.
-    let via = 'reading';
-    let candidates = findCandidates(phrase.tokens.map(token => token.choices), source);
-    if (!candidates.length) { via = 'polyphonic'; candidates = findCandidates(phrase.tokens.map(token => token.allChoices), source); }
-    // A phrase of four syllables or more may differ in one syllable per four (a typo, or a lyric changed while tuning).
-    if (!candidates.length && phrase.tokens.length >= 4) { via = 'approximate'; candidates = alignCandidates(phrase.tokens.map(token => token.allChoices), source, Math.floor(phrase.tokens.length / 4)); }
-    const free = candidates.map((candidate, position) => ({candidate, position})).filter(({candidate}) => candidate.noteIndices.every(note => note < 0 || !used.has(note)));
-    const requested = Number.isInteger(choices[index]) ? free.find(({position}) => position === choices[index]) : null;
-    const chosen = requested ?? free.find(({candidate}) => candidate.startNote > after) ?? free[0] ?? null;
-    if (chosen) {
-      chosen.candidate.noteIndices.forEach(note => { if (note >= 0) used.add(note); });
-      after = Math.max(...chosen.candidate.noteIndices);
+const GAP = 2;
+// A syllable read the usual way scores most, another reading of a polyphonic character a little less, a phoneme note
+// (whose reading is unknown) a little; a different syllable costs as much as a skipped one.
+function pairScore(token, item) {
+  if (item.wildcard) return 1;
+  if (token.choices.some(reading => item.choices.includes(reading))) return 3;
+  if (token.allChoices.some(reading => item.choices.includes(reading))) return 2;
+  return -GAP;
+}
+
+// Best local alignment (Smith-Waterman) of source items [from, to) against the pasted syllables that are available.
+function bestLocalAlignment(tokens, available, items, from, to) {
+  const rows = to - from, columns = tokens.length, width = columns + 1;
+  const score = new Int32Array((rows + 1) * width);
+  let best = 0, bestRow = 0, bestColumn = 0;
+  for (let row = 1; row <= rows; row += 1) {
+    const item = items[from + row - 1];
+    for (let column = 1; column <= columns; column += 1) {
+      const diagonal = available[column - 1] ? score[(row - 1) * width + column - 1] + pairScore(tokens[column - 1], item) : 0;
+      const value = Math.max(0, diagonal, score[(row - 1) * width + column] - (item.optional ? 0 : GAP), score[row * width + column - 1] - (tokens[column - 1].optional ? 0 : GAP));
+      score[row * width + column] = value;
+      if (value > best) { best = value; bestRow = row; bestColumn = column; }
     }
-    return {...phrase, via: candidates.length ? via : null, candidates: candidates.map(candidate => candidate.noteIndices), mismatches: candidates.map(candidate => candidate.mismatches), chosen: chosen ? chosen.position : -1};
-  });
+  }
+  const pairs = [];
+  for (let row = bestRow, column = bestColumn; row > 0 && column > 0 && score[row * width + column] > 0;) {
+    const value = score[row * width + column];
+    if (available[column - 1] && value === score[(row - 1) * width + column - 1] + pairScore(tokens[column - 1], items[from + row - 1])) {
+      pairs.push({token: column - 1, item: from + row - 1});
+      row -= 1;
+      column -= 1;
+    } else if (value === score[(row - 1) * width + column] - (items[from + row - 1].optional ? 0 : GAP)) row -= 1;
+    else column -= 1;
+  }
+  pairs.reverse();
+  // A lone syllable across a gap at either end ("…没唱 | 我们一起唱歌" reaching back for "chang") adds almost nothing
+  // and steals a note from the line before; ends worth no more than a point are trimmed.
+  const gapCost = (left, right) => {
+    let cost = 0;
+    for (let token = left.token + 1; token < right.token; token += 1) cost += tokens[token].optional ? 0 : GAP;
+    for (let item = left.item + 1; item < right.item; item += 1) cost += items[item].optional ? 0 : GAP;
+    return cost;
+  };
+  const worth = (pair, neighbour, before) => pairScore(tokens[pair.token], items[pair.item]) - (before ? gapCost(pair, neighbour) : gapCost(neighbour, pair));
+  while (pairs.length > 1 && worth(pairs[0], pairs[1], true) <= 1) pairs.shift();
+  while (pairs.length > 1 && worth(pairs.at(-1), pairs.at(-2), false) <= 1) pairs.pop();
+  const kept = pairs.reduce((sum, pair, index) => sum + pairScore(tokens[pair.token], items[pair.item]) - (index ? gapCost(pairs[index - 1], pair) : 0), 0);
+  return {score: Math.min(best, kept), pairs, first: pairs[0]?.item ?? from, last: pairs.at(-1)?.item ?? from};
+}
+
+// Aligns one voice: its best-matching stretch is taken first, then the next best among the notes still free, until no
+// stretch of about three syllables is left. A second round lets a chorus written once cover each time it is sung.
+function alignVoice(tokens, items) {
+  const matches = [];
+  const used = tokens.map(() => false);
+  let runs = [[0, items.length]];
+  for (const [reuse, threshold] of [[false, 8], [true, 11]]) {
+    const cache = new Map();
+    for (;;) {
+      const available = tokens.map((token, index) => token.alternativeOf < 0 && (reuse || !used[index]));
+      let best = null;
+      for (const run of runs) {
+        const key = run.join(':');
+        let found = cache.get(key);
+        if (!found || (!reuse && found.pairs.some(pair => !available[pair.token]))) { found = bestLocalAlignment(tokens, available, items, run[0], run[1]); cache.set(key, found); }
+        if (!best || found.score > best.found.score) best = {run, found};
+      }
+      if (!best || best.found.score < threshold) break;
+      const {run, found} = best;
+      for (const pair of found.pairs) { matches.push(pair); used[pair.token] = true; }
+      runs = runs.filter(item => item !== run);
+      if (found.first > run[0]) runs.push([run[0], found.first]);
+      if (found.last + 1 < run[1]) runs.push([found.last + 1, run[1]]);
+    }
+  }
+  return matches;
 }
 
 /**
- * How sure the editor is about where a located phrase goes: 'exact', 'high', 'low', or 'none' when it was not found.
- * A phrase carries via ('reading' | 'polyphonic' | 'approximate'), its candidates (note indices per position, -1 for a
- * pasted syllable without a note), the mismatches of each candidate, and the chosen candidate.
+ * Aligns one pasted lyric, in any order and with any paragraphs, to every voice at once. Each pasted syllable is
+ * 'same' (the note already says it), 'change' (a note sings it and will be corrected), 'low' (aligned to a note that
+ * sings another syllable) or 'none' (no voice sings it). write: 'typed' writes the pasted text, 'pinyin' its reading.
  */
-export function matchLevel(phrase) {
-  if (!phrase || phrase.chosen < 0) return 'none';
-  const candidate = phrase.candidates[phrase.chosen], mismatches = phrase.mismatches[phrase.chosen];
-  // A near match stays high while it differs in at most one syllable in eight and every pasted syllable has a note.
-  if (mismatches) return mismatches * 8 <= candidate.length && !candidate.includes(-1) ? 'high' : 'low';
-  // A short phrase found in several places may sit in the wrong one, and another reading of a polyphonic character is
-  // less certain than the usual one.
-  const ambiguous = phrase.candidates.length > 1 && candidate.length < 3;
-  return phrase.via === 'reading' && !ambiguous ? 'exact' : 'high';
+export function alignLyricsToTracks(text, tracks, {write = 'typed'} = {}) {
+  const tokens = lyricSyllables(text).map(token => ({...token, pairs: []}));
+  const changes = new Map();
+  const voices = (tracks ?? []).map((track, trackIndex) => {
+    const notes = track.notes ?? [];
+    const items = sourceSequence(notes);
+    const pairs = alignVoice(tokens, items);
+    const matchedNotes = new Set();
+    for (const {token: tokenIndex, item: itemIndex} of pairs) {
+      const token = tokens[tokenIndex], {noteIndex} = items[itemIndex];
+      if (matchedNotes.has(noteIndex)) continue;
+      matchedNotes.add(noteIndex);
+      const from = String(notes[noteIndex].lyrics ?? '');
+      const to = write === 'pinyin' ? token.choices[0] ?? token.value : token.value;
+      const kind = pairScore(token, items[itemIndex]) < 0 ? 'low' : from === to ? 'same' : 'change';
+      token.pairs.push({trackIndex, noteIndex, from, to, kind});
+      if (from !== to) changes.set(`${trackIndex}:${noteIndex}`, {trackIndex, trackId: track.id, noteIndex, from, to, kind});
+    }
+    // Notes that sing a syllable of their own; re-sung vowels and phoneme notes are not expected in a pasted lyric.
+    const sung = new Set(items.filter(item => !item.wildcard && !item.optional).map(item => item.noteIndex));
+    const uncoveredNotes = [...sung].filter(noteIndex => !matchedNotes.has(noteIndex));
+    return {trackId: track.id, name: track.name, syllables: sung.size, matched: sung.size - uncoveredNotes.length, changed: [...changes.values()].filter(change => change.trackIndex === trackIndex).length, uncovered: uncoveredNotes.length, uncoveredNotes};
+  });
+  for (const token of tokens) {
+    const source = token.alternativeOf >= 0 ? tokens[token.alternativeOf] : token;
+    token.status = !source.pairs.length ? 'none' : source.pairs.some(pair => pair.kind === 'change') ? 'change' : source.pairs.every(pair => pair.kind === 'low') ? 'low' : 'same';
+  }
+  // The unsung half of a doubled character goes with the half that was matched.
+  tokens.forEach((token, index) => { if (token.optional && token.status === 'none' && tokens[index - 1].status !== 'none') token.status = tokens[index - 1].status; });
+  return {tokens, voices, changes: [...changes.values()]};
 }
 
-/** Writes located phrases into the notes; returns the number of notes changed. */
-export function applyLocatedLyrics(notes, phrases) {
+/** Writes aligned corrections into the tracks; returns how many notes changed. */
+export function applyAlignedLyrics(tracks, changes) {
   let count = 0;
-  for (const phrase of phrases) {
-    const noteIndices = phrase.candidates[phrase.chosen];
-    if (!noteIndices) continue;
-    noteIndices.forEach((noteIndex, index) => {
-      if (!notes[noteIndex] || phrase.tokens[index] === undefined) return;
-      notes[noteIndex].lyrics = phrase.tokens[index].value;
-      count += 1;
-    });
+  for (const change of changes) {
+    const note = tracks[change.trackIndex]?.notes?.[change.noteIndex];
+    if (!note) continue;
+    note.lyrics = change.to;
+    count += 1;
   }
   return count;
-}
-
-export function applyHanziMatch(notes, match) {
-  if (!match || !Array.isArray(match.noteIndices) || !Array.isArray(match.characters) || match.noteIndices.length !== match.characters.length) return false;
-  const targets = match.noteIndices.map(index => notes?.[index]);
-  if (targets.some(note => !note || !note.lyrics || MARKERS.has(String(note.lyrics).trim()))) return false;
-  targets.forEach((note, index) => { note.lyrics = match.characters[index]; });
-  return true;
 }

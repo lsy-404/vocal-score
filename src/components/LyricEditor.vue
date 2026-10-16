@@ -1,419 +1,260 @@
 <script setup>
-import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue';
+// Lyrics: paste the correct lyric once — in any order, with any paragraphs and line breaks — and every voice is
+// corrected where it sings it. Below, the selected voice's notes can be edited one by one.
+import {computed, nextTick, ref, watch} from 'vue';
 import {t} from '../i18n.js';
-import FluentCheckbox from './FluentCheckbox.vue';
-import {applyLocatedLyrics, locatePastedLyrics, matchLevel} from '../lib/lyric-alignment.js';
+import MarkedTextarea from './MarkedTextarea.vue';
+import {alignLyricsToTracks, applyAlignedLyrics} from '../lib/lyric-alignment.js';
+
+const QUARTER = 705600000;
+const PITCH_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
+const FRACTIONS = [[1 / 2, '½'], [1 / 3, '⅓'], [2 / 3, '⅔'], [1 / 4, '¼'], [3 / 4, '¾'], [1 / 6, '⅙'], [5 / 6, '⅚'], [1 / 8, '⅛'], [3 / 8, '⅜'], [5 / 8, '⅝'], [7 / 8, '⅞']];
+const MARK = {same: 'exact', change: 'change', low: 'low', none: 'none'};
+const LEGEND = [['change', 'lyricEditor.markChange'], ['same', 'lyricEditor.markSame'], ['low', 'lyricEditor.markLow'], ['none', 'lyricEditor.markNone']];
 
 const props = defineProps({project: {type: Object, required: true}});
 const emit = defineEmits(['change']);
+const revision = ref(0);
+const tracks = computed(() => props.project.tracks);
 
-const activeTrackId = ref(String(props.project.tracks[0]?.id ?? ''));
-const pastedText = ref('');
-const pasteMode = ref('pinyin');
-const alignAllNotes = ref(false);
-const phraseChoices = ref({});
-const skipped = ref(new Set());
-const activePhrase = ref(-1);
-const pasteField = ref(null);
-const phraseList = ref(null);
-const pasteScroll = ref({top: 0, left: 0, bar: 0});
-const bulkSnapshots = new Map();
-const batchSnapshots = new Map();
-let noteSnapshots = new WeakMap();
-const snapshotRevision = ref(0);
-
-const activeTrack = computed(() => props.project.tracks.find(track => String(track.id) === activeTrackId.value) ?? null);
-const trackKey = computed(() => String(activeTrack.value?.id ?? ''));
-const notes = computed(() => activeTrack.value?.notes ?? []);
-const hasBulkSnapshot = computed(() => {
-  snapshotRevision.value;
-  return bulkSnapshots.has(trackKey.value);
-});
-const hasBatchSnapshot = computed(() => {
-  snapshotRevision.value;
-  return batchSnapshots.has(trackKey.value);
-});
-
-watch([pastedText, pasteMode, activeTrackId], () => { phraseChoices.value = {}; skipped.value = new Set(); });
-
-watch(() => props.project, project => {
-  activeTrackId.value = String(project.tracks[0]?.id ?? '');
-  bulkSnapshots.clear();
-  batchSnapshots.clear();
-  noteSnapshots = new WeakMap();
-  snapshotRevision.value += 1;
-}, {flush: 'sync'});
-
-function notify(change) {
-  emit('change', {...change, trackId: activeTrack.value?.id});
-}
-
-function updateTrackName(event) {
-  if (!activeTrack.value) return;
-  activeTrack.value.name = event.target.value;
-  notify({type: 'track-name', trackName: activeTrack.value.name});
-}
-
-function updateLyric(note, index, event) {
-  note.lyrics = event.target.value;
-  noteSnapshots.delete(note);
-  snapshotRevision.value += 1;
-  notify({type: 'lyric', noteIndex: index});
-}
-
-function toggleNoteLyric(note, index) {
-  const current = String(note.lyrics ?? '');
-  if (current) {
-    noteSnapshots.set(note, current);
-    note.lyrics = '';
-  } else if (noteSnapshots.has(note)) {
-    note.lyrics = noteSnapshots.get(note);
-    noteSnapshots.delete(note);
-  } else {
-    return;
+// Where a note sits: bar and beat, following meter changes.
+const bars = computed(() => {
+  const meters = [...(props.project.meters ?? [])].filter(item => Number(item.numerator) > 0 && Number(item.denominator) > 0).sort((a, b) => Number(a.index) - Number(b.index));
+  if (!meters.length) meters.push({index: 0, numerator: 4, denominator: 4});
+  const until = tracks.value.reduce((end, track) => track.notes.reduce((last, note) => Math.max(last, Number(note.onset) || 0), end), 0);
+  const starts = [];
+  let meter = meters[0];
+  for (let bar = 0, start = 0; start <= until && bar < 100000; bar += 1) {
+    meter = meters.find(item => Number(item.index) === bar) ?? meter;
+    starts.push({start, beat: QUARTER * 4 / Number(meter.denominator)});
+    start += QUARTER * 4 * Number(meter.numerator) / Number(meter.denominator);
   }
-  snapshotRevision.value += 1;
-  notify({type: 'lyric', noteIndex: index});
+  return starts;
+});
+function where(note) {
+  const onset = Math.max(0, Number(note?.onset) || 0);
+  let low = 0, high = bars.value.length - 1;
+  while (low < high) { const middle = (low + high + 1) >> 1; if (bars.value[middle].start <= onset) low = middle; else high = middle - 1; }
+  const bar = bars.value[low] ?? {start: 0, beat: QUARTER};
+  return {bar: low + 1, beat: Math.floor((onset - bar.start) / bar.beat + 1e-6) + 1};
+}
+const positionLabel = note => { const {bar, beat} = where(note); return t('lyricEditor.position', {bar, beat}); };
+const pitchLabel = pitch => { const value = Math.round(Number(pitch)); return `${PITCH_NAMES[((value % 12) + 12) % 12]}${Math.floor(value / 12) - 1}`; };
+function beatsLabel(duration) {
+  const beats = Math.max(0, Number(duration) || 0) / QUARTER, whole = Math.floor(beats + 1e-6), rest = beats - whole;
+  const fraction = rest < 1e-6 ? '' : FRACTIONS.find(([value]) => Math.abs(value - rest) < 1e-6)?.[1];
+  return t('lyricEditor.beats', {beats: fraction === undefined ? String(Number(beats.toFixed(2))) : `${whole || !fraction ? whole : ''}${fraction}`});
 }
 
-function clearAllLyrics() {
-  const track = activeTrack.value;
-  if (!track || !track.notes.length || bulkSnapshots.has(trackKey.value)) return;
-  bulkSnapshots.set(trackKey.value, track.notes.map(note => String(note.lyrics ?? '')));
-  track.notes.forEach(note => { note.lyrics = ''; });
-  snapshotRevision.value += 1;
-  notify({type: 'clear-track-lyrics'});
-}
-
-function restoreAllLyrics() {
-  const track = activeTrack.value;
-  const snapshot = bulkSnapshots.get(trackKey.value);
-  if (!track || !snapshot) return;
-  track.notes.forEach((note, index) => { note.lyrics = snapshot[index] ?? ''; });
-  bulkSnapshots.delete(trackKey.value);
-  snapshotRevision.value += 1;
-  notify({type: 'restore-track-lyrics'});
-}
-
-// Paste modes: keep the pasted words, write Chinese as pinyin, or write the Chinese characters.
-const WRITE = {pinyin: 'typed', hanzi: 'pinyin', 'hanzi-text': 'hanzi'};
-const pasteError = computed(() => {
-  const text = pastedText.value.trim();
-  if (!text || pasteMode.value === 'pinyin') return '';
-  if (/[A-Za-z]/u.test(text)) return t('lyricEditor.rejectEnglish');
-  if (!/\p{Script=Han}/u.test(text)) return t('lyricEditor.invalidHanzi');
-  return '';
-});
-// Each pasted phrase is looked up in the existing lyrics first, so only the notes that already sing it change.
-const located = computed(() => pasteError.value ? [] : locatePastedLyrics(pastedText.value, notes.value, {write: WRITE[pasteMode.value], choices: phraseChoices.value}));
-const locatedCount = computed(() => located.value.filter(phrase => phrase.chosen >= 0).length);
-const tokens = computed(() => ({tokens: located.value.flatMap(phrase => phrase.tokens.map(token => token.value)), error: pasteError.value}));
-const targets = computed(() => notes.value
-  .map((note, index) => ({note, index}))
-  .filter(({note}) => alignAllNotes.value || (String(note.lyrics ?? '') !== '' && !['-', '+'].includes(String(note.lyrics ?? '')))));
-const exactCount = computed(() => !tokens.value.error && tokens.value.tokens.length > 0 && tokens.value.tokens.length === targets.value.length);
-// Located phrases win when every phrase is found; otherwise a paste covering the whole voice still replaces in order.
-const strategy = computed(() => {
-  if (tokens.value.error || !tokens.value.tokens.length) return 'none';
-  if (locatedCount.value === located.value.length) return 'located';
-  if (exactCount.value) return 'sequential';
-  return locatedCount.value ? 'located' : 'none';
-});
-const countStatus = computed(() => {
-  if (tokens.value.error) return tokens.value.error;
-  if (strategy.value === 'located') return t('lyricEditor.locatedCount', {located: locatedCount.value, phrases: located.value.length, notes: changeCount.value});
-  const params = {targets: targets.value.length, tokens: tokens.value.tokens.length};
-  if (exactCount.value) return `${t('lyricEditor.replacementCount', params)} · ${t('lyricEditor.countExact')}`;
-  const missing = Math.abs(targets.value.length - tokens.value.tokens.length);
-  return `${t('lyricEditor.replacementCount', params)} · ${t(targets.value.length > tokens.value.tokens.length ? 'lyricEditor.countUnder' : 'lyricEditor.countOver', {difference: missing})}`;
-});
-const LEVELS = ['exact', 'high', 'low', 'none'];
-const LEVEL_LABELS = {exact: 'lyricEditor.levelExact', high: 'lyricEditor.levelHigh', low: 'lyricEditor.levelLow', none: 'lyricEditor.levelNone'};
-const levels = computed(() => located.value.map(matchLevel));
-const levelCounts = computed(() => Object.fromEntries(LEVELS.map(level => [level, levels.value.filter(item => item === level).length])));
-// Old → new for each syllable of a located phrase: a change, the same lyric again, or a pasted syllable with no note.
-function phrasePairs(phrase) {
-  return phrase.candidates[phrase.chosen].map((noteIndex, index) => {
-    const to = String(phrase.tokens[index].value);
-    if (noteIndex < 0) return {from: to, to: t('lyricEditor.noNote'), kind: 'missing'};
-    const from = String(notes.value[noteIndex]?.lyrics ?? '');
-    return {from: from || t('lyricEditor.empty'), to, kind: from === to ? 'same' : 'change'};
-  });
-}
-const changeCount = computed(() => {
-  if (strategy.value === 'sequential') return targets.value.filter(({note}, index) => String(note.lyrics ?? '') !== tokens.value.tokens[index]).length;
-  if (strategy.value !== 'located') return 0;
-  return located.value.reduce((sum, phrase, index) => sum + (phrase.chosen < 0 || skipped.value.has(index) ? 0 : phrasePairs(phrase).filter(pair => pair.kind === 'change').length), 0);
-});
-// Marks drawn under the pasted text, as in CASSIE's editor: each syllable takes its phrase's level, a syllable without a
-// note is not found, a left-out phrase is plain, and an in-order replacement marks every syllable alike.
-const marks = computed(() => {
-  const text = pastedText.value;
+// Correcting with a pasted lyric. Alignment follows the text a moment after typing stops.
+const text = ref('');
+const settled = ref('');
+const writeMode = ref('typed');
+let timer = 0;
+watch(text, value => { clearTimeout(timer); timer = setTimeout(() => { settled.value = value; }, 150); });
+const result = computed(() => { revision.value; return settled.value.trim() ? alignLyricsToTracks(settled.value, tracks.value, {write: writeMode.value}) : null; });
+const current = computed(() => (result.value && settled.value === text.value ? result.value : null));
+const counts = computed(() => Object.fromEntries(LEGEND.map(([status]) => [status, current.value?.tokens.filter(token => token.status === status).length ?? 0])));
+const spans = computed(() => {
+  const value = text.value;
+  if (!current.value) return [{text: value, kind: 'plain', group: -1}];
   const spans = [];
   let cursor = 0;
-  located.value.forEach((phrase, index) => phrase.tokens.forEach((token, position) => {
-    const kind = strategy.value === 'sequential' ? 'order' : skipped.value.has(index) ? 'skipped' : phrase.chosen < 0 || phrase.candidates[phrase.chosen][position] < 0 ? 'none' : levels.value[index];
-    if (token.start > cursor) spans.push({text: text.slice(cursor, token.start), kind: 'plain', phrase: -1});
-    spans.push({text: text.slice(token.start, token.end), kind, phrase: index});
+  current.value.tokens.forEach((token, index) => {
+    if (token.start > cursor) spans.push({text: value.slice(cursor, token.start), kind: 'plain', group: -1});
+    spans.push({text: value.slice(token.start, token.end), kind: MARK[token.status], group: index});
     cursor = token.end;
-  }));
-  // A trailing space keeps a final empty line as tall as the textarea's.
-  spans.push({text: `${text.slice(cursor)} `, kind: 'plain', phrase: -1});
+  });
+  spans.push({text: value.slice(cursor), kind: 'plain', group: -1});
   return spans;
 });
-function syncPasteScroll() {
-  const field = pasteField.value;
-  if (!field) return;
-  const style = getComputedStyle(field);
-  pasteScroll.value = {top: field.scrollTop, left: field.scrollLeft, bar: Math.max(0, field.offsetWidth - field.clientWidth - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth))};
-}
-// The phrase under the caret is highlighted in the text and in the list, and the list follows it.
-function followCaret() {
-  syncPasteScroll();
-  const at = pasteField.value?.selectionStart ?? -1;
-  activePhrase.value = located.value.findIndex(phrase => at >= phrase.start && at <= phrase.end);
-}
-watch(activePhrase, index => nextTick(() => phraseList.value?.querySelector(`[data-phrase="${index}"]`)?.scrollIntoView?.({block: 'nearest'})));
-function selectPhrase(index) {
-  const phrase = located.value[index], field = pasteField.value;
-  if (!phrase || !field) return;
-  activePhrase.value = index;
-  field.focus({preventScroll: true});
-  field.setSelectionRange(phrase.start, phrase.end);
-  syncPasteScroll();
-}
-function toggleSkip(index) {
-  const next = new Set(skipped.value);
-  if (next.has(index)) next.delete(index); else next.add(index);
-  skipped.value = next;
-}
-let pasteObserver = null;
-onMounted(() => {
-  if (typeof ResizeObserver !== 'function' || !pasteField.value) return;
-  pasteObserver = new ResizeObserver(syncPasteScroll);
-  pasteObserver.observe(pasteField.value);
+// What the syllable under the caret does in each voice.
+const caretAt = ref(-1);
+const caretIndex = computed(() => current.value?.tokens.findIndex(token => caretAt.value >= token.start && caretAt.value <= token.end) ?? -1);
+const caretInfo = computed(() => {
+  const token = current.value?.tokens[caretIndex.value];
+  if (!token) return '';
+  const source = token.alternativeOf >= 0 ? current.value.tokens[token.alternativeOf] : token;
+  if (!source.pairs.length) return t('lyricEditor.caretNone', {text: token.value});
+  return source.pairs.slice(0, 4).map(pair => `${tracks.value[pair.trackIndex]?.name ?? ''} ${positionLabel(tracks.value[pair.trackIndex]?.notes[pair.noteIndex])}：${pair.from || '_'} → ${pair.to}`).join('　');
 });
-onBeforeUnmount(() => pasteObserver?.disconnect());
+const voices = computed(() => (current.value?.voices ?? []).map((voice, trackIndex) => ({...voice, trackIndex})).filter(voice => voice.syllables));
+const changeCount = computed(() => current.value?.changes.length ?? 0);
 
-const previewRows = computed(() => {
-  const length = Math.min(10, Math.max(targets.value.length, tokens.value.tokens.length));
-  return Array.from({length}, (_, index) => ({
-    index,
-    note: targets.value[index]?.note ?? null,
-    token: tokens.value.tokens[index] ?? null
-  }));
-});
-const previewMore = computed(() => Math.max(targets.value.length, tokens.value.tokens.length) > 10);
-
-function pitchLabel(pitch) {
-  const names = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
-  const value = Math.round(Number(pitch));
-  return `${names[((value % 12) + 12) % 12]}${Math.floor(value / 12) - 1}`;
-}
-
-function positionLabel(onset) {
-  let remaining = Math.max(0, Number(onset) || 0) / 705600000;
-  const meters = [...(props.project.meters ?? [])]
-    .filter(item => Number.isFinite(Number(item.index)) && Number(item.numerator) > 0 && Number(item.denominator) > 0)
-    .sort((a, b) => Number(a.index) - Number(b.index));
-  if (!meters.length) meters.push({index: 0, numerator: 4, denominator: 4});
-  let bar = 0;
-  let meter = meters[0];
-  for (; bar < 100000; bar += 1) {
-    const length = Number(meter.numerator) * 4 / Number(meter.denominator);
-    if (remaining < length || !Number.isFinite(length) || length <= 0) {
-      return t('lyricEditor.position', {bar: bar + 1, beat: Math.floor(remaining) + 1});
-    }
-    remaining -= length;
-    const change = meters.find(item => Number(item.index) === bar + 1);
-    if (change) meter = change;
-  }
-  return t('lyricEditor.position', {bar: bar + 1, beat: Math.floor(remaining) + 1});
-}
-
-function choosePhrase(index, value) {
-  phraseChoices.value = {...phraseChoices.value, [index]: Number(value)};
-}
-
-function firstNote(candidate) {
-  return notes.value[candidate.find(noteIndex => noteIndex >= 0)];
-}
-
-function applyReplacement() {
-  const track = activeTrack.value;
-  if (!track || strategy.value === 'none') return;
-  batchSnapshots.set(trackKey.value, track.notes.map(note => String(note.lyrics ?? '')));
-  let count = targets.value.length;
-  if (strategy.value === 'located') count = applyLocatedLyrics(track.notes, located.value.filter((phrase, index) => !skipped.value.has(index)));
-  else targets.value.forEach(({note}, index) => { note.lyrics = tokens.value.tokens[index]; });
-  snapshotRevision.value += 1;
+// One undo step for a correction, across every voice.
+let snapshot = null;
+const hasSnapshot = ref(false);
+function notify(change) { emit('change', change); }
+function apply() {
+  if (!changeCount.value) return;
+  snapshot = tracks.value.map(track => track.notes.map(note => String(note.lyrics ?? '')));
+  const count = applyAlignedLyrics(tracks.value, current.value.changes);
+  hasSnapshot.value = true;
+  revision.value += 1;
   notify({type: 'replace-track-lyrics', count});
 }
-
-function undoReplacement() {
-  const track = activeTrack.value;
-  const snapshot = batchSnapshots.get(trackKey.value);
-  if (!track || !snapshot) return;
-  track.notes.forEach((note, index) => { note.lyrics = snapshot[index] ?? ''; });
-  batchSnapshots.delete(trackKey.value);
-  snapshotRevision.value += 1;
+function undo() {
+  if (!snapshot) return;
+  tracks.value.forEach((track, trackIndex) => track.notes.forEach((note, noteIndex) => { note.lyrics = snapshot[trackIndex]?.[noteIndex] ?? note.lyrics; }));
+  snapshot = null;
+  hasSnapshot.value = false;
+  revision.value += 1;
   notify({type: 'undo-lyric-replacement'});
+}
+
+// Editing one voice note by note, laid out in sung lines (a rest of a beat or more starts a new line).
+const activeTrackId = ref(String(tracks.value[0]?.id ?? ''));
+const bulk = new Map();
+watch(() => props.project, project => { activeTrackId.value = String(project.tracks[0]?.id ?? ''); snapshot = null; hasSnapshot.value = false; bulk.clear(); revision.value += 1; }, {flush: 'sync'});
+const activeIndex = computed(() => tracks.value.findIndex(track => String(track.id) === activeTrackId.value));
+const activeTrack = computed(() => tracks.value[activeIndex.value] ?? null);
+const notes = computed(() => activeTrack.value?.notes ?? []);
+const lines = computed(() => {
+  const lines = [];
+  let line = null, end = -Infinity;
+  notes.value.forEach((note, index) => {
+    const onset = Number(note.onset) || 0;
+    if (!line || onset - end >= QUARTER || line.indices.length >= 16) { line = {indices: [], bar: where(note).bar}; lines.push(line); }
+    line.indices.push(index);
+    end = Math.max(end, onset + (Number(note.duration) || 0));
+  });
+  return lines;
+});
+const pending = computed(() => new Map((current.value?.changes ?? []).filter(change => change.trackIndex === activeIndex.value).map(change => [change.noteIndex, change.to])));
+const uncovered = computed(() => new Set(current.value?.voices[activeIndex.value]?.uncoveredNotes ?? []));
+const isExtension = lyrics => lyrics === '-' || lyrics === '+';
+const cellSize = value => Math.max(2, [...String(value ?? '')].reduce((size, character) => size + (character.codePointAt(0) > 255 ? 2 : 1), 0));
+function cellTitle(note, index) {
+  const to = pending.value.get(index);
+  return `${positionLabel(note)} · ${pitchLabel(note.pitch)} · ${beatsLabel(note.duration)}${to === undefined ? '' : ` → ${to}`}`;
+}
+function renameTrack(event) {
+  if (!activeTrack.value) return;
+  activeTrack.value.name = String(event.target.value).slice(0, 160);
+  notify({type: 'track-name', trackId: activeTrack.value.id, trackName: activeTrack.value.name});
+}
+function setLyric(index, value) {
+  const note = notes.value[index];
+  if (!note || note.lyrics === value) return;
+  note.lyrics = value;
+  revision.value += 1;
+  notify({type: 'lyric', trackId: activeTrack.value.id, noteIndex: index});
+}
+const hasBulk = computed(() => { revision.value; return bulk.has(activeTrackId.value); });
+function clearAll() {
+  if (!notes.value.length || bulk.has(activeTrackId.value)) return;
+  bulk.set(activeTrackId.value, notes.value.map(note => String(note.lyrics ?? '')));
+  notes.value.forEach(note => { note.lyrics = ''; });
+  revision.value += 1;
+  notify({type: 'clear-track-lyrics', trackId: activeTrack.value.id});
+}
+function restoreAll() {
+  const saved = bulk.get(activeTrackId.value);
+  if (!saved) return;
+  notes.value.forEach((note, index) => { note.lyrics = saved[index] ?? ''; });
+  bulk.delete(activeTrackId.value);
+  revision.value += 1;
+  notify({type: 'restore-track-lyrics', trackId: activeTrack.value.id});
+}
+const grid = ref(null);
+function showNote(trackIndex, noteIndex) {
+  activeTrackId.value = String(tracks.value[trackIndex]?.id ?? activeTrackId.value);
+  nextTick(() => { const cell = grid.value?.querySelector(`[data-note="${noteIndex}"]`); cell?.scrollIntoView?.({block: 'nearest'}); cell?.focus({preventScroll: true}); });
+}
+// One button per bar with unmatched notes, leading to its first unmatched note.
+function barsOf(voice) {
+  const bars = new Map();
+  for (const noteIndex of voice.uncoveredNotes) { const {bar} = where(tracks.value[voice.trackIndex].notes[noteIndex]); if (!bars.has(bar)) bars.set(bar, noteIndex); }
+  return [...bars].map(([bar, noteIndex]) => ({bar, noteIndex}));
 }
 </script>
 
 <template>
   <section class="lyric-editor">
-    <div class="lyric-editor__heading">
-      <h3>{{ t('lyricEditor.title') }}</h3>
+    <div class="lyric-editor__heading"><h3>{{ t('lyricEditor.title') }}</h3></div>
+
+    <div class="lyric-editor__card lyric-editor__paste">
+      <div class="lyric-editor__row">
+        <label for="lyric-editor-paste">{{ t('lyricEditor.correctTitle') }}</label>
+        <div class="lyric-editor__segments" role="radiogroup" :aria-label="t('lyricEditor.writeAs')">
+          <span>{{ t('lyricEditor.writeAs') }}</span>
+          <button v-for="mode in ['typed', 'pinyin']" :key="mode" type="button" role="radio" :aria-checked="writeMode === mode" :class="{active: writeMode === mode}" @click="writeMode = mode">{{ t(mode === 'typed' ? 'lyricEditor.writeText' : 'lyricEditor.writeReading') }}</button>
+        </div>
+      </div>
+      <MarkedTextarea input-id="lyric-editor-paste" v-model="text" :spans="spans" :active="caretIndex" :min-rows="5" label="粘贴歌词文本" :placeholder="t('lyricEditor.correctPlaceholder')" @caret="caretAt = $event" />
+      <template v-if="current">
+        <div class="lyric-editor__legend"><span v-for="[status, label] in LEGEND" :key="status"><i class="mark-swatch" :class="`mark-${MARK[status]}`" aria-hidden="true">abc</i>{{ t(label, {count: counts[status]}) }}</span></div>
+        <p class="lyric-editor__caret" aria-live="polite">{{ caretInfo || t('lyricEditor.caretHint') }}</p>
+        <ul class="lyric-editor__voices">
+          <li v-for="voice in voices" :key="voice.trackId">
+            <strong>{{ voice.name }}</strong>
+            <span>{{ t('lyricEditor.voiceSummary', {changed: voice.changed, matched: voice.matched, syllables: voice.syllables}) }}</span>
+            <span v-if="voice.uncovered" class="lyric-editor__uncovered">{{ t('lyricEditor.uncovered', {count: voice.uncovered}) }}<button v-for="item in barsOf(voice).slice(0, 10)" :key="item.bar" type="button" @click="showNote(voice.trackIndex, item.noteIndex)">{{ item.bar }}</button><template v-if="barsOf(voice).length > 10">…</template></span>
+          </li>
+        </ul>
+      </template>
+      <div v-if="current || hasSnapshot" class="lyric-editor__batch-tools">
+        <button v-if="current" class="fluent-button fluent-button--primary" type="button" :disabled="!changeCount" @click="apply">{{ changeCount ? t('lyricEditor.correctCount', {count: changeCount}) : t('lyricEditor.noChange') }}</button>
+        <button v-if="hasSnapshot" class="fluent-button fluent-button--subtle" type="button" @click="undo">{{ t('lyricEditor.undoBatch') }}</button>
+      </div>
+    </div>
+
+    <div class="lyric-editor__card">
+      <div class="lyric-editor__voice">
+        <select id="lyric-editor-track" v-model="activeTrackId" class="fluent-select__control" aria-label="选择声部"><option v-for="track in tracks" :key="track.id" :value="String(track.id)">{{ track.name || t('lyricEditor.noVoice') }}</option></select>
+        <input v-if="activeTrack" id="lyric-editor-name" :value="activeTrack.name" class="fluent-field__input" type="text" maxlength="160" autocomplete="off" aria-label="声部名称" @input="renameTrack">
+      </div>
       <div class="lyric-editor__tools">
-        <button class="fluent-button fluent-button--subtle" type="button" :disabled="!notes.length || hasBulkSnapshot" @click="clearAllLyrics">{{ t('lyricEditor.clearAll') }}</button>
-        <button v-if="hasBulkSnapshot" class="fluent-button fluent-button--subtle" type="button" @click="restoreAllLyrics">{{ t('lyricEditor.restoreAll') }}</button>
+        <span>{{ t('lyricEditor.editNotes') }}</span>
+        <button class="fluent-button fluent-button--subtle" type="button" :disabled="!notes.length || hasBulk" @click="clearAll">{{ t('lyricEditor.clearAll') }}</button>
+        <button v-if="hasBulk" class="fluent-button fluent-button--subtle" type="button" @click="restoreAll">{{ t('lyricEditor.restoreAll') }}</button>
       </div>
-    </div>
-
-    <div v-if="activeTrack" class="lyric-editor__voice">
-      <label for="lyric-editor-track">{{ t('lyricEditor.voice') }}</label>
-      <select id="lyric-editor-track" v-model="activeTrackId" class="fluent-select__control" aria-label="选择声部">
-        <option v-for="track in project.tracks" :key="track.id" :value="String(track.id)">{{ track.name || t('lyricEditor.noVoice') }}</option>
-      </select>
-      <label for="lyric-editor-name">{{ t('lyricEditor.voiceName') }}</label>
-      <input id="lyric-editor-name" v-model="activeTrack.name" class="fluent-field__input" type="text" maxlength="160" autocomplete="off" aria-label="声部名称" @input="updateTrackName">
-    </div>
-
-    <div class="lyric-editor__paste">
-      <label for="lyric-editor-paste">{{ t('lyricEditor.pasteText') }}</label>
-      <div class="lyric-editor__field" :style="{'--bar': `${pasteScroll.bar}px`}">
-        <textarea id="lyric-editor-paste" ref="pasteField" v-model="pastedText" class="fluent-field__input" rows="4" spellcheck="false" aria-label="粘贴歌词文本" @scroll="syncPasteScroll" @input="followCaret" @click="followCaret" @keyup="followCaret" @select="followCaret" @focus="followCaret" />
-        <div class="lyric-editor__marks" aria-hidden="true"><pre :style="{transform: `translate(${-pasteScroll.left}px, ${-pasteScroll.top}px)`}"><span v-for="(span, index) in marks" :key="index" :class="[`mark-${span.kind}`, {'is-active': span.phrase >= 0 && span.phrase === activePhrase}]">{{ span.text }}</span></pre></div>
-      </div>
-      <div v-if="strategy==='located'" class="lyric-editor__legend"><span v-for="level in LEVELS" :key="level"><i :class="`mark-${level}`" aria-hidden="true">abc</i>{{ t(LEVEL_LABELS[level]) }} {{ levelCounts[level] }}</span></div>
-      <label class="lyric-editor__mode" for="lyric-editor-mode">
-        <span>{{ t('lyricEditor.pasteMode') }}</span>
-        <select id="lyric-editor-mode" v-model="pasteMode" class="fluent-select__control" aria-label="粘贴文本处理方式">
-          <option value="pinyin">{{ t('lyricEditor.writeTyped') }}</option>
-          <option value="hanzi">{{ t('lyricEditor.writePinyin') }}</option>
-          <option value="hanzi-text">{{ t('lyricEditor.writeHanzi') }}</option>
-        </select>
-      </label>
-      <div class="lyric-editor__alignment">
-        <FluentCheckbox v-model="alignAllNotes" :label="t('lyricEditor.alignAll')" />
-      </div>
-      <div class="lyric-editor__preview" aria-live="polite">
-        <p class="lyric-editor__counts" :class="{'is-mismatch': strategy==='none'}">{{ countStatus }}</p>
-        <div v-if="strategy==='located'" ref="phraseList" class="lyric-editor__phrases">
-          <div v-for="(phrase,index) in located" :key="index" :data-phrase="index" class="lyric-editor__phrase" :class="[`is-${levels[index]}`, {'is-active': index===activePhrase, 'is-skipped': skipped.has(index)}]">
-            <div class="lyric-editor__phrase-head">
-              <input v-if="phrase.chosen>=0" type="checkbox" :checked="!skipped.has(index)" :aria-label="t('lyricEditor.includePhrase',{text:phrase.text})" @change="toggleSkip(index)">
-              <button type="button" class="lyric-editor__phrase-text" :title="t('lyricEditor.showInText')" @click="selectPhrase(index)">{{ phrase.text }}</button>
-              <span class="lyric-editor__level">{{ t(LEVEL_LABELS[levels[index]]) }}<template v-if="phrase.chosen>=0&&phrase.mismatches[phrase.chosen]"> · {{ t('lyricEditor.approximate',{count:phrase.mismatches[phrase.chosen]}) }}</template></span>
-              <span v-if="phrase.chosen>=0" class="lyric-editor__where">{{ positionLabel(firstNote(phrase.candidates[phrase.chosen]).onset) }}</span>
-              <select v-if="phrase.candidates.length>1" class="fluent-select__control" :value="phrase.chosen" :aria-label="t('lyricEditor.chooseMatch')" @change="choosePhrase(index,$event.target.value)"><option v-for="(candidate,position) in phrase.candidates" :key="position" :value="position">{{ t('lyricEditor.occurrence',{index:position+1,count:phrase.candidates.length}) }} · {{ positionLabel(firstNote(candidate).onset) }}</option></select>
-            </div>
-            <div v-if="phrase.chosen>=0" class="lyric-editor__pairs"><span v-for="(pair,position) in phrasePairs(phrase)" :key="position" :class="`pair-${pair.kind}`">{{ pair.kind==='same' ? pair.to : `${pair.from}→${pair.to}` }}</span></div>
+      <div ref="grid" class="lyric-editor__grid" :aria-label="t('lyricEditor.notes')">
+        <div v-for="(line, lineIndex) in lines" :key="lineIndex" class="lyric-editor__line">
+          <span class="lyric-editor__bar">{{ line.bar }}</span>
+          <div class="lyric-editor__note">
+            <input v-for="index in line.indices" :key="index" :data-note="index" :value="notes[index].lyrics" :size="cellSize(notes[index].lyrics)" :class="{'is-extension': isExtension(String(notes[index].lyrics ?? '')), 'is-empty': !notes[index].lyrics, 'is-pending': pending.has(index), 'is-uncovered': uncovered.has(index)}" :title="cellTitle(notes[index], index)" :aria-label="t('lyricEditor.noteLyric', {index: index + 1})" autocomplete="off" spellcheck="false" placeholder="·" @input="$event.isComposing || setLyric(index, $event.target.value)" @compositionend="setLyric(index, $event.target.value)">
           </div>
         </div>
-        <template v-else>
-        <div v-for="row in previewRows" :key="row.index" class="lyric-editor__pair" :class="{'is-extra': !row.note}">
-          <span v-if="row.note">{{ row.index + 1 }}. {{ positionLabel(row.note.onset) }} {{ pitchLabel(row.note.pitch) }} · {{ row.note.lyrics || t('lyricEditor.empty') }} → {{ row.token ?? t('lyricEditor.missingLyric') }}</span>
-          <span v-else>{{ row.index + 1 }}. {{ t('lyricEditor.extraLyric') }} → {{ row.token }}</span>
-        </div>
-        <small v-if="previewMore" class="lyric-editor__more">{{ t('lyricEditor.previewMore', {count: 10,total: Math.max(targets.length, tokens.tokens.length)}) }}</small>
-        </template>
+        <p v-if="!notes.length" class="lyric-editor__empty">{{ t('lyricEditor.noVoice') }}</p>
       </div>
-      <div class="lyric-editor__batch-tools">
-        <button class="fluent-button fluent-button--primary" type="button" :disabled="strategy==='none'||!changeCount" @click="applyReplacement">{{ changeCount ? t('lyricEditor.applyCount',{count:changeCount}) : t('lyricEditor.apply') }}</button>
-        <button v-if="hasBatchSnapshot" class="fluent-button fluent-button--subtle" type="button" @click="undoReplacement">{{ t('lyricEditor.undoBatch') }}</button>
-      </div>
-    </div>
-
-    <div class="lyric-editor__list" :aria-label="t('lyricEditor.notes')">
-      <div v-for="(note, index) in notes" :key="index" class="lyric-editor__note">
-        <div class="lyric-editor__note-meta">
-          <span>{{ positionLabel(note.onset) }} · {{ pitchLabel(note.pitch) }}</span>
-          <span>{{ t('lyricEditor.duration', {duration: note.duration}) }}</span>
-        </div>
-        <input
-          v-model="note.lyrics"
-          class="fluent-field__input"
-          type="text"
-          maxlength="512"
-          autocomplete="off"
-          :aria-label="t('lyricEditor.noteLyric',{index:index+1})"
-          @input="updateLyric(note, index, $event)"
-        >
-        <button
-          class="fluent-button fluent-button--subtle"
-          type="button"
-          :disabled="!note.lyrics && !noteSnapshots.has(note)"
-          :aria-label="t(note.lyrics?'lyricEditor.clearNote':'lyricEditor.restoreNote',{index:index+1})"
-          @click="toggleNoteLyric(note, index)"
-        >{{ t(note.lyrics?'清除':'还原') }}</button>
-      </div>
-      <p v-if="!notes.length" class="lyric-editor__empty">{{ t('lyricEditor.noVoice') }}</p>
     </div>
   </section>
 </template>
 
 <style scoped>
-.lyric-editor{background:var(--fluent-surface,rgb(250 250 250));border:1px solid var(--fluent-border,rgba(0,0,0,.14));border-radius:var(--fluent-panel-radius,8px);padding:14px;margin:0 0 18px;color:var(--fluent-text,rgb(27 27 27));font:12px/1.5 system-ui,sans-serif}
-.lyric-editor__heading{display:flex;align-items:center;justify-content:space-between;gap:10px}
-.lyric-editor h3{font-size:14px;margin:0}
-.lyric-editor__voice{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;margin:12px 0}
-.lyric-editor__voice label,.lyric-editor__paste>label:first-child{color:var(--fluent-muted,rgb(93 93 93))}
-.lyric-editor__voice input,.lyric-editor__voice select{width:100%;min-width:0}
-.lyric-editor__paste{padding:10px 0;border-top:1px solid var(--fluent-border,rgba(0,0,0,.14))}
-.lyric-editor__paste>label:first-child{display:block;margin-bottom:5px}
-.lyric-editor__field{position:relative}
-.lyric-editor__field textarea,.lyric-editor__marks pre{box-sizing:border-box;margin:0;padding:6px 8px;font:13px/22px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:0;white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2}
-.lyric-editor__field textarea{position:relative;display:block;width:100%;min-height:96px;border-width:1px;resize:vertical;color:transparent;caret-color:var(--fluent-text,rgb(27 27 27));background:var(--fluent-surface,#fff)}
-.lyric-editor__field textarea::selection{color:transparent;background:var(--fluent-selection,rgb(0 103 192 / .25))}
-.lyric-editor__marks{position:absolute;inset:1px calc(1px + var(--bar,0px)) 1px 1px;overflow:hidden;pointer-events:none}
-.lyric-editor__marks pre{min-height:100%;color:var(--fluent-text,rgb(27 27 27));border:0}
-.lyric-editor__marks span,.lyric-editor__legend i{text-decoration-line:underline;text-decoration-thickness:2px;text-underline-offset:4px;text-decoration-skip-ink:none}
-.lyric-editor .mark-plain,.lyric-editor .mark-skipped{text-decoration-line:none}
-.lyric-editor .mark-skipped{color:var(--fluent-muted,rgb(93 93 93))}
-.lyric-editor .mark-exact{text-decoration-color:var(--fluent-success,#0f7b0f)}
-.lyric-editor .mark-high{text-decoration-color:var(--fluent-accent,#0067c0)}
-.lyric-editor .mark-low{text-decoration-color:var(--fluent-warning,#9d5d00);text-decoration-style:dashed}
-.lyric-editor .mark-none{text-decoration-color:var(--fluent-danger,#c42b1c);text-decoration-style:wavy;text-decoration-thickness:1.5px}
-.lyric-editor .mark-order{text-decoration-color:var(--fluent-accent,#0067c0);text-decoration-style:dotted}
-.lyric-editor__marks span.is-active{background:var(--fluent-selection,rgb(0 103 192 / .18));border-radius:2px}
-.lyric-editor__legend{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:6px;color:var(--fluent-muted,rgb(93 93 93));font-size:11px}
-.lyric-editor__legend i{margin-right:4px;font-style:normal;color:transparent}
-.lyric-editor__mode{display:grid;grid-template-columns:auto minmax(130px,1fr);align-items:center;gap:8px;margin-top:8px;color:var(--fluent-muted,rgb(93 93 93))}
-.lyric-editor__alignment{display:flex;align-items:center;gap:6px;margin:8px 0;color:var(--fluent-muted,rgb(93 93 93));font-size:11px}
-.lyric-editor__counts{margin:5px 0;color:var(--fluent-accent,rgb(0 103 192));font-size:11px}
-.lyric-editor__counts.is-mismatch,.lyric-editor__pair.is-extra,.lyric-editor__phrase.is-extra{color:var(--fluent-danger,rgb(196 43 28))}
-.lyric-editor__pair{padding:3px 0;color:var(--fluent-text,rgb(27 27 27));font-size:11px;overflow-wrap:anywhere}
-.lyric-editor__phrases{max-height:300px;overflow:auto;margin:4px 0;border:1px solid var(--fluent-border,rgba(0,0,0,.14));border-radius:var(--fluent-radius,4px);scrollbar-width:thin}
-.lyric-editor__phrase{display:grid;gap:4px;padding:6px 8px;border-bottom:1px solid var(--fluent-border,rgb(229 229 229));border-left:3px solid transparent;font-size:11px;overflow-wrap:anywhere}
-.lyric-editor__phrase:last-child{border-bottom:0}
-.lyric-editor__phrase.is-exact{border-left-color:var(--fluent-success,#0f7b0f)}
-.lyric-editor__phrase.is-high{border-left-color:var(--fluent-accent,#0067c0)}
-.lyric-editor__phrase.is-low{border-left-color:var(--fluent-warning,#9d5d00)}
-.lyric-editor__phrase.is-none{border-left-color:var(--fluent-danger,#c42b1c);color:var(--fluent-danger,#c42b1c)}
-.lyric-editor__phrase.is-active{background:var(--fluent-selection,rgb(0 103 192 / .1))}
-.lyric-editor__phrase.is-skipped .lyric-editor__pairs,.lyric-editor__phrase.is-skipped .lyric-editor__phrase-text{opacity:.5;text-decoration:line-through}
-.lyric-editor__phrase-head{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px}
-.lyric-editor__phrase-head input{margin:0}
-.lyric-editor__phrase-text{min-height:0;padding:0;border:0;border-radius:0;box-shadow:none;background:none;color:inherit;font:inherit;font-weight:600;cursor:pointer;text-align:left}
-.lyric-editor__phrase-text:hover{text-decoration:underline}
-.lyric-editor__level{color:var(--fluent-muted,rgb(93 93 93))}
-.lyric-editor__where{margin-left:auto;color:var(--fluent-muted,rgb(93 93 93))}
-.lyric-editor__phrase select{min-height:26px;font-size:11px;max-width:100%}
-.lyric-editor__pairs{display:flex;flex-wrap:wrap;gap:3px}
-.lyric-editor__pairs span{padding:0 5px;border-radius:3px;background:var(--fluent-control,rgb(0 0 0 / .05))}
-.lyric-editor__pairs .pair-same{color:var(--fluent-muted,rgb(93 93 93));background:none}
-.lyric-editor__pairs .pair-change{font-weight:600}
-.lyric-editor__pairs .pair-missing{color:var(--fluent-danger,#c42b1c)}
-.lyric-editor__more{display:block;color:var(--fluent-muted,rgb(93 93 93));margin-top:4px}
-.lyric-editor__batch-tools{display:flex;gap:8px;margin-top:8px}
-.lyric-editor__list{max-height:280px;overflow:auto;border-top:1px solid var(--fluent-border,rgba(0,0,0,.14));scrollbar-width:thin}
-.lyric-editor__note{display:grid;grid-template-columns:minmax(112px,1fr) minmax(100px,1.4fr) auto;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid var(--fluent-border,rgba(0,0,0,.1))}
-.lyric-editor__note-meta{display:grid;color:var(--fluent-muted,rgb(93 93 93));font-size:10px;line-height:1.5}
-.lyric-editor__note input{width:100%;min-width:0}
-.lyric-editor .fluent-button{min-height:30px;padding:0 9px;font-size:11px;box-shadow:none}
-.lyric-editor__tools{display:flex;align-items:center;gap:8px}
+.lyric-editor{display:grid;gap:12px;color:var(--fluent-text,rgb(27 27 27));font:12px/1.5 system-ui,sans-serif}
+.lyric-editor__heading h3{margin:0;font-size:14px}
+.lyric-editor__card{display:grid;gap:8px;padding:10px;border:1px solid var(--fluent-border,rgba(0,0,0,.14));border-radius:var(--fluent-panel-radius,8px);background:var(--fluent-surface,#fff)}
+.lyric-editor__row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px}
+.lyric-editor__row label{font-size:13px;font-weight:600}
+.lyric-editor__segments{display:inline-flex;align-items:center;gap:4px;color:var(--fluent-muted,rgb(93 93 93));font-size:11px}
+.lyric-editor__segments button{padding:2px 9px;border:1px solid var(--fluent-border,rgba(0,0,0,.14));border-radius:12px;background:transparent;color:inherit;font:inherit;cursor:pointer}
+.lyric-editor__segments button.active{border-color:var(--fluent-accent,#0067c0);background:rgb(0 103 192 / .1);color:var(--fluent-text,rgb(27 27 27))}
+.lyric-editor__legend{display:flex;flex-wrap:wrap;gap:4px 12px;color:var(--fluent-muted,rgb(93 93 93));font-size:11px}
+.lyric-editor__caret{min-height:18px;margin:0;color:var(--fluent-muted,rgb(93 93 93));font-size:11px;overflow-wrap:anywhere}
+.lyric-editor__voices{display:grid;gap:3px;margin:0;padding:6px 0 0;border-top:1px solid var(--fluent-border,rgba(0,0,0,.08));list-style:none;font-size:11px}
+.lyric-editor__voices li{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px}
+.lyric-editor__voices span{color:var(--fluent-muted,rgb(93 93 93))}
+.lyric-editor__uncovered{display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:3px}
+.lyric-editor__uncovered button{padding:0 5px;border:1px solid var(--fluent-danger,#c42b1c);border-radius:8px;background:none;color:var(--fluent-danger,#c42b1c);font:inherit;font-size:10px;cursor:pointer}
+.lyric-editor__batch-tools{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+.lyric-editor .fluent-button{min-height:30px;padding:0 10px;font-size:12px;box-shadow:none}
+.lyric-editor__voice{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.lyric-editor__voice select,.lyric-editor__voice input{width:100%;min-width:0}
+.lyric-editor__tools{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.lyric-editor__tools span{margin-right:auto;font-size:13px;font-weight:600}
+.lyric-editor__grid{display:grid;gap:2px;max-height:min(60vh,520px);overflow:auto;scrollbar-width:thin}
+.lyric-editor__line{display:grid;grid-template-columns:28px minmax(0,1fr);gap:6px;align-items:start;padding:3px 0;border-bottom:1px solid var(--fluent-border,rgba(0,0,0,.06))}
+.lyric-editor__bar{padding-top:4px;color:var(--fluent-muted,rgb(93 93 93));font-size:10px;text-align:right}
+.lyric-editor__note{display:flex;flex-wrap:wrap;gap:3px}
+.lyric-editor__note input{min-width:0;padding:2px 4px;border:1px solid transparent;border-radius:3px;background:var(--fluent-control,rgb(0 0 0 / .04));color:inherit;font:14px/1.4 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;text-align:center}
+.lyric-editor__note input:hover{border-color:var(--fluent-border,rgba(0,0,0,.2))}
+.lyric-editor__note input:focus{border-color:var(--fluent-accent,#0067c0);background:var(--fluent-surface,#fff);outline:none}
+.lyric-editor__note input.is-extension{color:var(--fluent-muted,rgb(93 93 93));background:transparent}
+.lyric-editor__note input.is-empty{background:transparent;border-style:dashed;border-color:var(--fluent-border,rgba(0,0,0,.2))}
+.lyric-editor__note input.is-pending{box-shadow:inset 0 -2px 0 var(--fluent-accent,#0067c0)}
+.lyric-editor__note input.is-uncovered{box-shadow:inset 0 -2px 0 var(--fluent-danger,#c42b1c)}
 .lyric-editor__empty{color:var(--fluent-muted,rgb(93 93 93));font-size:11px}
-@media(max-width:560px){.lyric-editor__heading{align-items:flex-start;flex-direction:column}.lyric-editor__tools{flex-wrap:wrap}.lyric-editor__note{grid-template-columns:minmax(86px,.8fr) minmax(100px,1.2fr)}.lyric-editor__note button{grid-column:2;justify-self:start}}
+@media(max-width:700px){.lyric-editor__note input{font-size:16px}}
 </style>
