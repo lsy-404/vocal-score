@@ -248,23 +248,44 @@ function beatAt(beats, position) {
   return low > 0 && position < beats[low - 1] + QUARTER ? low - 1 : -1;
 }
 
-// Beats whose note boundaries sit clearly on the triplet grid and fit it far better than the straight grid. Onsets count
-// fully and ends half; a beat needs a boundary off the straight grid, so straight rhythms never turn into triplets.
-function tripletBeats(notes, beats, step, unit) {
+// How the note boundaries of each quarter beat fit the triplet grid against the straight grid. Onsets count fully and
+// ends half; `offsets` are the triplet positions used and `half` marks a straight boundary in the middle of the beat.
+function beatFits(notes, beats, step, unit) {
   const fit = new Map();
   const visit = (position, weight) => {
     const index = beatAt(beats, position);
     if (index < 0) return;
     const offset = position - beats[index], snapped = Math.round(offset / unit) * unit;
-    const entry = fit.get(index) ?? { straight: 0, triplet: 0, fits: true, off: false };
+    const entry = fit.get(index) ?? { straight: 0, triplet: 0, fits: true, off: false, half: false, offsets: new Set() };
     entry.straight += weight * Math.abs(position - quantize(position, step));
     entry.triplet += weight * Math.abs(offset - snapped);
     if (weight === 1 && Math.abs(offset - snapped) >= QUARTER / 16) entry.fits = false;
     if ((beats[index] + snapped) % step) entry.off = true;
+    if (quantize(position, step) - beats[index] === QUARTER / 2) entry.half = true;
+    entry.offsets.add(snapped);
     fit.set(index, entry);
   };
   for (const note of notes) { visit(Number(note.onset), 1); visit(Number(note.onset) + Number(note.duration), 0.5); }
+  return fit;
+}
+
+// Beats whose note boundaries sit clearly on the triplet grid and fit it far better than the straight grid; a beat needs
+// a boundary off the straight grid, so straight rhythms never turn into triplets.
+function tripletBeats(fit) {
   return new Set([...fit].filter(([, entry]) => entry.fits && entry.off && entry.triplet < entry.straight / 2).map(([index]) => index));
+}
+
+// Triplet beats that use only the beat start and its last third, a long-short (♩♪³) pair: under a Swing marking they are
+// written as two straight eighths. `straight` counts the other beats with a straight eighth, which would then read as swung.
+const SWING_OFFSET = QUARTER * 2 / 3;
+function beatRhythm(fit, { triplets, swing }) {
+  const found = tripletBeats(fit);
+  const swung = swing ? new Set([...found].filter(index => [...fit.get(index).offsets].every(offset => offset === 0 || offset === SWING_OFFSET || offset === QUARTER))) : NO_TRIPLETS;
+  return {
+    triplets: triplets ? new Set([...found].filter(index => !swung.has(index))) : NO_TRIPLETS,
+    swung,
+    straight: swung.size ? [...fit].filter(([index, entry]) => entry.half && !found.has(index)).length : 0
+  };
 }
 
 function noteValues(divisions) {
@@ -426,22 +447,30 @@ function unpitchedXml(pitch) {
   return [`<unpitched><display-step>${step}</display-step><display-octave>${octave}</display-octave></unpitched>`, head ? `<notehead>${head}</notehead>` : ''];
 }
 
-function pieceXml(piece, fifths, measureIndex, partIndex, laneIndex, percussion = false) {
+// Triplet marks: a bracket with its number, the number alone, or (simile) the number only until a rhythm repeats.
+function pieceXml(piece, fifths, measureIndex, partIndex, laneIndex, percussion = false, { extenders = true, tupletMarks = 'bracket' } = {}) {
   const { span } = piece;
   const modification = piece.tuplet ? '<time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification>' : '';
-  const bracket = `${piece.tupletStart ? '<tuplet type="start" bracket="yes"/>' : ''}${piece.tupletStop ? '<tuplet type="stop"/>' : ''}`;
+  const tupletAttributes = tupletMarks === 'bracket' ? ' bracket="yes"' : ` bracket="no"${piece.tupletHidden ? ' show-number="none"' : ''}`;
+  const bracket = `${piece.tupletStart ? `<tuplet type="start"${tupletAttributes}/>` : ''}${piece.tupletStop ? '<tuplet type="stop"/>' : ''}`;
   if (span.rest) return `<note><rest/><duration>${piece.duration}</duration><voice>${laneIndex + 1}</voice><type>${piece.type}</type>${'<dot/>'.repeat(piece.dots)}${modification}${bracket ? `<notations>${bracket}</notations>` : ''}</note>`;
   const tieIn = piece.index > 0 || span.before;
   const tieOut = !piece.last || span.after;
   const ties = `${tieIn ? '<tie type="stop"/>' : ''}${tieOut ? '<tie type="start"/>' : ''}`;
   const tied = `${tieIn ? '<tied type="stop"/>' : ''}${tieOut ? '<tied type="start"/>' : ''}`;
+  // A melisma slur opens on the first written piece of its first note and closes on the last piece of its last note.
+  const slur = `${span.note.slur === 'start' && piece.index === 0 && !span.before ? '<slur number="1" type="start"/>' : ''}${span.note.slur === 'stop' && piece.last && !span.after ? '<slur number="1" type="stop"/>' : ''}`;
+  // A glide's slide runs from the end of the syllable's note to the start of the next note.
+  const opening = piece.index === 0 && !span.before;
+  const slide = `${span.note.slideIn && opening ? '<slide number="1" type="stop"/>' : ''}${span.note.slideOut && piece.last && !span.after ? '<slide number="1" type="start" line-type="solid"/>' : ''}`;
+  const graces = opening && !percussion ? (span.note.graces ?? []).map(grace => `<note><grace slash="yes"/>${pitchXml(grace.pitch, fifths)}<voice>${laneIndex + 1}</voice><type>eighth</type></note>`).join('') : '';
   const write = (note, fallbackNoteIndex, chord) => {
     const [pitch, notehead] = percussion ? unpitchedXml(note.pitch) : [pitchXml(note.pitch, fifths), ''];
-    const lyric = chord || piece.index > 0 ? '' : span.lyricMode === 'continue' ? '<lyric><extend type="continue"/></lyric>' : lyricXml(note.lyrics, span.lyricMode);
-    const notations = chord ? tied : tied + bracket;
+    const lyric = chord || piece.index > 0 ? '' : span.lyricMode === 'continue' ? (extenders ? '<lyric><extend type="continue"/></lyric>' : '') : lyricXml(note.lyrics, span.lyricMode, extenders);
+    const notations = chord ? tied : tied + slur + slide + bracket;
     return `<note id="${musicXmlNoteId(note, piece.index, measureIndex, partIndex, laneIndex, fallbackNoteIndex)}">${chord ? '<chord/>' : ''}${pitch}<duration>${piece.duration}</duration>${ties}<voice>${laneIndex + 1}</voice><type>${piece.type}</type>${'<dot/>'.repeat(piece.dots)}${modification}${notehead}${chord ? '' : (piece.beams ?? []).join('')}${notations ? `<notations>${notations}</notations>` : ''}${lyric}</note>`;
   };
-  return [write(span.note, span.fallbackNoteIndex, false), ...span.chord.map(member => write(member.note, member.fallbackNoteIndex, true))].join('');
+  return graces + [write(span.note, span.fallbackNoteIndex, false), ...span.chord.map(member => write(member.note, member.fallbackNoteIndex, true))].join('');
 }
 
 // Tempo points become readable marks: whole BPM, one point per grid position, and runs of small steps written as rit./accel.
@@ -475,16 +504,16 @@ function tempoMarks(tempos, step) {
   return marks;
 }
 
-function lyricXml(lyrics, mode) {
+function lyricXml(lyrics, mode, extenders = true) {
   const silence = new Set(['', '+', '-', 'br', 'SP', 'sil']);
-  if (mode === 'stop') return '<lyric><extend type="stop"/></lyric>';
+  if (mode === 'stop') return extenders ? '<lyric><extend type="stop"/></lyric>' : '';
   if (silence.has(lyrics)) return '';
   const boundary = /[-‐‑‒–—]/u;
   const starts = boundary.test(lyrics[0] || '');
   const ends = boundary.test(lyrics.at(-1) || '');
   const syllabic = starts && ends ? 'middle' : starts ? 'end' : ends ? 'begin' : boundary.test(lyrics) ? 'single' : null;
   const text = lyrics.replace(/^[-‐‑‒–—]+|[-‐‑‒–—]+$/gu, '');
-  return `<lyric>${syllabic ? `<syllabic>${syllabic}</syllabic>` : ''}<text>${xml(text)}</text>${mode === 'start' ? '<extend type="start"/>' : ''}</lyric>`;
+  return `<lyric>${syllabic ? `<syllabic>${syllabic}</syllabic>` : ''}<text>${xml(text)}</text>${mode === 'start' && extenders ? '<extend type="start"/>' : ''}</lyric>`;
 }
 
 // Notes that do not overlap in the source must not overlap once snapped to the grid, or a very short note lands on its
@@ -553,6 +582,58 @@ function mergeConsecutive(notes, level, step) {
   return { notes: kept, count };
 }
 
+// Automatic merging reads each continuation on its own. A held syllable at the same pitch joins its note; a note of a
+// sixteenth or less that ends the syllable is a glide when it moves on toward (or lands on) the next pitch and an
+// ornament when it turns back; longer notes at another pitch stay as a melisma. `glides` writes glides and ornaments:
+// 'line' joins them to the syllable's note and draws a slide from it to the next note (ornaments are only joined),
+// 'grace' joins them and writes their pitches as grace notes before the next note, 'absorb' only joins them, and
+// 'keep' leaves them as notes.
+const GLIDE_STYLES = ['line', 'grace', 'absorb', 'keep'];
+const SHORT_NOTE = QUARTER / 4;
+
+function mergeAuto(notes, step, glides) {
+  const kept = [];
+  let count = 0, glideCount = 0, ornamentCount = 0, syllable = '', slideIn = false, graces = [];
+  const continues = lyrics => isExtension(lyrics) || repeatsVowel(syllable, lyrics);
+  const push = note => {
+    kept.push({ ...note, ...(slideIn ? { slideIn: true } : {}), ...(graces.length ? { graces } : {}) });
+    slideIn = false;
+    graces = [];
+  };
+  notes.forEach((note, index) => {
+    const previous = kept.at(-1), next = notes[index + 1];
+    const lyrics = String(note.lyrics ?? '').trim();
+    const gap = previous ? note.start - previous.end : -1;
+    if (!previous || !continues(lyrics) || gap < 0 || gap > step) {
+      push(note);
+      if (lyrics && !isExtension(lyrics)) syllable = lyrics;
+      return;
+    }
+    if (note.pitch === previous.pitch) {
+      previous.end = note.end;
+      previous.duration = previous.end - previous.start;
+      count += 1;
+      return;
+    }
+    const adjacent = next && next.start - note.end <= step;
+    const endsSyllable = !adjacent || !continues(String(next.lyrics ?? '').trim());
+    if (note.duration > SHORT_NOTE || !endsSyllable || glides === 'keep') {
+      // A re-sung vowel becomes part of the syllable's melisma, as at the medium level.
+      if (!isExtension(lyrics)) count += 1;
+      push({ ...note, lyrics: isExtension(lyrics) ? lyrics : '-' });
+      return;
+    }
+    const glide = adjacent && (next.pitch === note.pitch || Math.sign(next.pitch - note.pitch) === Math.sign(note.pitch - previous.pitch));
+    if (glide) glideCount += 1; else ornamentCount += 1;
+    previous.end = note.end;
+    previous.duration = previous.end - previous.start;
+    count += 1;
+    if (glides === 'line' && glide) { previous.slideOut = true; slideIn = true; }
+    if (glides === 'grace' && adjacent) graces = [...graces, { pitch: note.pitch }];
+  });
+  return { notes: kept, count, glideCount, ornamentCount };
+}
+
 function partitionVoices(notes, step) {
   const lanes = [];
   for (const note of notes) {
@@ -583,6 +664,49 @@ function overlapsInterval(index, note) {
   }
   return (low > 0 && index.prefixMaxEnd[low - 1] > note.start) ||
     (low < index.intervals.length && index.intervals[low].start < note.end);
+}
+
+// Notation styles: how a melisma is shown (extender line, slur or both) and how triplets are marked.
+const MELISMA_STYLES = ['extender', 'slur', 'both'];
+const TUPLET_MARKS = ['bracket', 'number', 'simile'];
+
+// Notes sung to one syllable, the syllable's note and the continuations after it, get one slur over them. Notes with the
+// same start and end are one chord, written by its first note, so the slur goes on that note.
+function markMelismas(lane) {
+  const chords = [];
+  for (const note of lane) {
+    const chord = chords.at(-1);
+    if (chord && chord[0].start === note.start && chord[0].end === note.end) chord.push(note);
+    else chords.push([note]);
+  }
+  const has = (chord, ...modes) => chord.some(note => modes.includes(note.lyricMode));
+  for (let index = 0; index < chords.length; index += 1) {
+    if (!has(chords[index], 'start')) continue;
+    let last = index;
+    while (last + 1 < chords.length && has(chords[last + 1], 'continue', 'stop')) {
+      last += 1;
+      if (!has(chords[last], 'continue')) break;
+    }
+    if (last > index) { chords[index][0].slur = 'start'; chords[last][0].slur = 'stop'; }
+    index = last;
+  }
+}
+
+// Simile triplets: once the same triplet rhythm follows itself beat after beat, its number is shown twice and then left
+// out. `run` carries the rhythm, its count and where it ended from the previous measure; returns the run to carry on.
+function hideRepeatedTuplets(pieces, measureStart, run) {
+  for (let index = 0; index < pieces.length; index += 1) {
+    if (!pieces[index].tupletStart) continue;
+    let last = index;
+    while (!pieces[last].tupletStop && last + 1 < pieces.length) last += 1;
+    const group = pieces.slice(index, last + 1);
+    const signature = group.map(piece => `${piece.span.rest ? 'r' : 'n'}${piece.duration}`).join(',');
+    const start = measureStart + group[0].start, end = measureStart + group.at(-1).start + group.at(-1).duration;
+    run = run && run.signature === signature && run.end === start ? { signature, count: run.count + 1, end } : { signature, count: 1, end };
+    if (run.count > 2) for (const piece of group) piece.tupletHidden = true;
+    index = last;
+  }
+  return run;
 }
 
 // Only sung tracks are merged; instrumental tracks keep their own staves.
@@ -713,7 +837,7 @@ function overlapRatio(notes, signal) {
   return Math.min(1, covered / total);
 }
 
-export function createScore(project, { trackIds, grid = 16, transpose = 0, fifths = 0, title, mergeContinuations = false, mergeAcrossSingers = false, mergeOverlap = 0.05, modulation = false, noteMerge = 'none', preserveOrder = false, triplets = false, pitchAdjustment = { enabled: true, thresholdCents: 50 } } = {}) {
+export function createScore(project, { trackIds, grid = 16, transpose = 0, fifths = 0, title, mergeContinuations = false, mergeAcrossSingers = false, mergeOverlap = 0.05, modulation = false, noteMerge = 'none', preserveOrder = false, triplets = false, swing = false, melisma = 'extender', tupletMarks = 'bracket', glides = 'line', pitchAdjustment = { enabled: true, thresholdCents: 50 } } = {}) {
   if (!project || !Array.isArray(project.tracks)) throw new TypeError('Project must contain parsed tracks.');
   if (![4, 8, 16, 32].includes(grid)) throw new RangeError('Grid must be 4, 8, 16, or 32.');
   if (trackIds !== undefined && !Array.isArray(trackIds)) throw new TypeError('Track IDs must be an array.');
@@ -721,7 +845,11 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
   if (typeof mergeAcrossSingers !== 'boolean') throw new TypeError('mergeAcrossSingers must be a boolean.');
   if (!finite(mergeOverlap) || Number(mergeOverlap) < 0 || Number(mergeOverlap) > 0.5) throw new RangeError('mergeOverlap must be a share between 0 and 0.5.');
   if (typeof triplets !== 'boolean') throw new TypeError('triplets must be a boolean.');
-  if (noteMerge !== 'none' && !NOTE_MERGE[noteMerge]) throw new RangeError('noteMerge must be none, low, medium or high.');
+  if (typeof swing !== 'boolean') throw new TypeError('swing must be a boolean.');
+  if (!MELISMA_STYLES.includes(melisma)) throw new RangeError('melisma must be extender, slur or both.');
+  if (!TUPLET_MARKS.includes(tupletMarks)) throw new RangeError('tupletMarks must be bracket, number or simile.');
+  if (noteMerge !== 'none' && noteMerge !== 'auto' && !NOTE_MERGE[noteMerge]) throw new RangeError('noteMerge must be auto, none, low, medium or high.');
+  if (!GLIDE_STYLES.includes(glides)) throw new RangeError('glides must be line, grace, absorb or keep.');
   if (!pitchAdjustment || typeof pitchAdjustment !== 'object' || typeof pitchAdjustment.enabled !== 'boolean' || !finite(pitchAdjustment.thresholdCents) || Number(pitchAdjustment.thresholdCents) <= 0 || Number(pitchAdjustment.thresholdCents) > 1200) throw new RangeError('Pitch adjustment requires an enabled flag and threshold between 0 and 1200 cents.');
   if (!finite(transpose) || !Number.isInteger(Number(transpose)) || !finite(fifths) || !Number.isInteger(Number(fifths)) || Number(fifths) < -7 || Number(fifths) > 7) throw new RangeError('Invalid transposition or key signature.');
   const chosen = trackIds === undefined ? project.tracks : project.tracks.filter(track => trackIds.includes(track.id));
@@ -734,19 +862,32 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
   const step = QUARTER * 4 / grid;
   const meters = [...project.meters].sort((a, b) => a.index - b.index);
   const tempos = [...project.tempos].sort((a, b) => a.position - b.position);
-  // Triplet beats are chosen per part for instruments and across all voices, so that merging vocal parts never re-times a note.
-  const unit = triplets ? TRIPLET_UNIT[grid] : undefined;
+  // Triplet and swung beats are chosen per part for instruments and across all voices, so that merging vocal parts never
+  // re-times a note.
+  const unit = triplets || swing ? TRIPLET_UNIT[grid] : undefined;
   const beats = unit ? quarterBeats(meters, selected.reduce((last, track) => track.notes.reduce((end, note) => Math.max(end, Number(note.onset) + Number(note.duration)), last), 0) + QUARTER) : [];
-  const shared = unit ? tripletBeats(selected.filter(isVocal).flatMap(track => track.notes), beats, step, unit) : null;
-  const tripletSets = selected.map(track => (!unit ? NO_TRIPLETS : isVocal(track) ? shared : tripletBeats(track.notes, beats, step, unit)));
+  const plain = { triplets: NO_TRIPLETS, swung: NO_TRIPLETS, straight: 0 };
+  const shared = unit ? beatRhythm(beatFits(selected.filter(isVocal).flatMap(track => track.notes), beats, step, unit), { triplets, swing }) : plain;
+  const rhythms = selected.map(track => (!unit ? plain : isVocal(track) ? shared : beatRhythm(beatFits(track.notes, beats, step, unit), { triplets, swing })));
+  const tripletSets = rhythms.map(rhythm => rhythm.triplets);
+  const swungCount = new Set(rhythms.flatMap(rhythm => [...rhythm.swung])).size;
+  const straightCount = Math.max(0, ...rhythms.map(rhythm => rhythm.straight));
+  if (swungCount && straightCount) warnings.push(`Swing notation: ${straightCount} beat(s) with straight eighths will read as swung.`);
   // Triplets need a third of the straight tick, so the divisions only grow when a score has them.
   const divisions = tripletSets.some(set => set.size) ? grid * 3 : grid;
-  let mergedNoteCount = 0;
+  let mergedNoteCount = 0, glideCount = 0, ornamentCount = 0;
   const normalized = selected.map((track, sourceIndex) => {
     let shifted = 0, residual = 0, curved = 0, approximated = new Set();
-    const tripletSet = tripletSets[sourceIndex];
+    const tripletSet = tripletSets[sourceIndex], swung = rhythms[sourceIndex].swung;
     const tripletBeat = position => { if (!tripletSet.size) return null; const index = beatAt(beats, position); return index >= 0 && tripletSet.has(index) ? beats[index] : null; };
-    const snap = position => { const beat = tripletBeat(position); return beat === null ? quantize(position, step) : beat + Math.round((position - beat) / unit) * unit; };
+    // In a swung beat the long-short pair is written straight: its last third becomes the half beat.
+    const swungBeat = position => { if (!swung.size) return null; const index = beatAt(beats, position); return index >= 0 && swung.has(index) ? beats[index] : null; };
+    const snap = position => {
+      const swingStart = swungBeat(position);
+      if (swingStart !== null) { const offset = Math.round((position - swingStart) / unit) * unit; return swingStart + (offset >= QUARTER ? QUARTER : offset >= SWING_OFFSET ? QUARTER / 2 : 0); }
+      const beat = tripletBeat(position);
+      return beat === null ? quantize(position, step) : beat + Math.round((position - beat) / unit) * unit;
+    };
     const notes = track.notes.map((note, sourceOrder) => {
       const start = snap(Number(note.onset));
       const originalEnd = Number(note.onset) + Number(note.duration);
@@ -794,8 +935,10 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
     }
     const snapped = separateSnapped(notes);
     if (snapped.count) warnings.push(`${track.name}: ${snapped.count} very short note(s) merged into a neighbour at this rhythm grid.`);
-    const merged = mergeConsecutive(snapped.notes, noteMerge, step);
+    const merged = noteMerge === 'auto' ? mergeAuto(snapped.notes, step, glides) : mergeConsecutive(snapped.notes, noteMerge, step);
     mergedNoteCount += merged.count;
+    glideCount += merged.glideCount ?? 0;
+    ornamentCount += merged.ornamentCount ?? 0;
     const lanes = partitionVoices(merged.notes, step).map(lane => lane.map((note, index) => {
       const next = lane[index + 1];
       let lyricMode = 'normal';
@@ -817,6 +960,7 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
   if (merging && !outputTracks.length) throw new Error('Selected tracks contain no vocal notes.');
   for (const track of outputTracks) {
     if (track.lanes.length > 1) warnings.push(`${track.name}: overlapping notes are rendered as ${track.lanes.length} voices.`);
+    if (melisma !== 'extender') for (const lane of track.lanes) markMelismas(lane);
   }
   const leadTrack = normalized.find(track => isVocal(track) && track.lanes.some(lane => lane.length));
   const leadId = leadTrack?.id;
@@ -861,8 +1005,12 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
   const marks = tempoMarks(tempos, step);
   const values = noteValues(divisions);
   const tripletList = unit ? tripletValues(divisions, Math.round(unit / QUARTER * divisions)) : [];
+  const style = { extenders: melisma !== 'slur', tupletMarks };
+  // MusicXML 4.0 swing: eighths are played long-short, 2:1, which the marking shows as ♫ = ♩♪³.
+  const swingXml = swungCount ? '<direction placement="above"><direction-type><words font-weight="bold">Swing (♫ = ♩♪³)</words></direction-type><sound><swing><first>2</first><second>1</second><swing-type>eighth</swing-type></swing></sound></direction>' : '';
   const parts = outputTracks.map((track, partIndex) => {
     const id = `P${partIndex + 1}`;
+    const tupletRuns = [];
     const body = measures.map((measure, measureIndex) => {
       const changingMeter = measureIndex === 0 || measure.meter !== measures[measureIndex - 1].meter;
       // Drum staves carry no key signature (OSMD ignores print-object="no", so they stay in C throughout).
@@ -906,11 +1054,12 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
           return spelled.map((piece, index) => ({ ...piece, span, index, last: index === spelled.length - 1 }));
         });
         beamPieces(pieces, starts, measure.meter);
+        if (tupletMarks === 'simile') tupletRuns[laneIndex] = hideRepeatedTuplets(pieces, measure.start, tupletRuns[laneIndex]);
         if (laneIndex > 0) voiceXml.push(`<backup><duration>${Math.round(measureLength)}</duration></backup>`);
-        voiceXml.push(pieces.map(piece => pieceXml(piece, measureFifths[measureIndex], measureIndex, partIndex, laneIndex, clefs[partIndex] === 'percussion')).join(''));
+        voiceXml.push(pieces.map(piece => pieceXml(piece, measureFifths[measureIndex], measureIndex, partIndex, laneIndex, clefs[partIndex] === 'percussion', style)).join(''));
       });
       const barline = '<barline location="right"><bar-style>regular</bar-style></barline>';
-      return `<measure number="${measureIndex + 1}">${attrs}${directionXml}${voiceXml.join('')}${barline}</measure>`;
+      return `<measure number="${measureIndex + 1}">${attrs}${measureIndex === 0 && partIndex === 0 ? swingXml : ''}${directionXml}${voiceXml.join('')}${barline}</measure>`;
     }).join('');
     return { id, name: track.name, xml: `<part id="${id}">${body}</part>`, track };
   });
@@ -965,8 +1114,9 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
     stats: { noteCount: outputTracks.reduce((sum, track) => sum + track.lanes.reduce((total, lane) => total + lane.length, 0), 0), measureCount: measures.length, partCount: parts.length },
     parts: parts.map(({ id, name }) => ({ id, name })),
     keyChanges: keyChanges.map(change => ({ ...change })),
-    noteMerge: { level: noteMerge, mergedCount: mergedNoteCount },
-    triplets: { enabled: Boolean(unit), beatCount: new Set(tripletSets.flatMap(set => [...set])).size },
+    noteMerge: { level: noteMerge, mergedCount: mergedNoteCount, glideCount, ornamentCount },
+    triplets: { enabled: triplets, beatCount: new Set(tripletSets.flatMap(set => [...set])).size },
+    swing: { enabled: swing, beatCount: swungCount, straightBeatCount: swungCount ? straightCount : 0 },
     model,
     merging: { enabled: merging, movedNoteCount: mergeResult.movedNoteCount, sourcePartCount, outputPartCount: outputTracks.length, moves: mergeResult.moves, roles },
     pitchAdjustments: {

@@ -8,6 +8,7 @@ const warningPatterns = [
   [/^(.+): (?:.+ )?pitch curve uses a linear sampling approximation for note adjustment\.$/u, 'svp.warning.linearCurve', match => ({track: match[1]})],
   [/^(.+): pitch curve shape is reduced to one representative value per note for score display\.$/u, 'svp.warning.representativeCurve', match => ({track: match[1]})],
   [/^(.+): (\d+) note\(s\) keep a remaining tuning deviation as metadata, not engraved\.$/u, 'svp.warning.residual', match => ({track: match[1], count: match[2]})],
+  [/^Swing notation: (\d+) beat\(s\) with straight eighths will read as swung\.$/u, 'svp.warning.swingStraight', match => ({count: match[1]})],
   [/^(.+): (\d+) note\(s\) shifted by grid quantization\.$/u, 'svp.warning.quantized', match => ({track: match[1], count: match[2]})],
   [/^(.+): (\d+) very short note\(s\) merged into a neighbour at this rhythm grid\.$/u, 'svp.warning.snapped', match => ({track: match[1], count: match[2]})],
   [/^(.+): overlapping notes are rendered as (\d+) voices\.$/u, 'svp.warning.overlap', match => ({track: match[1], count: match[2]})],

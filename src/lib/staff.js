@@ -123,6 +123,8 @@ export async function renderStaffScore(container, xml, {
   osmd.EngravingRules.VexFlowTextFontFamily = fontFamily;
   osmd.EngravingRules.LyricsHeight = Math.max(10, Math.min(24, Number(lyricFontSize) || 14)) / 10;
   osmd.EngravingRules.RenderMeasureNumbersOnlyAtSystemStart = false;
+  // Triplet numbers follow the score's own tuplet marks (bracket, number alone or simile), not OSMD's repetition limit.
+  osmd.EngravingRules.TupletNumberLimitConsecutiveRepetitions = false;
   await osmd.load(xml);
   osmd.Zoom = 1;
   osmd.render();

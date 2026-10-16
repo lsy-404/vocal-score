@@ -87,6 +87,7 @@ function parseMeasure(measure, divisions, warnings, partName, tonic, minor) {
   let maxTime = 0;
   let localDivisions = divisions;
   let hasBackup = false;
+  const graces = [];
   for (const item of Array.from(measure.children)) {
     if (item.localName === "attributes") {
       localDivisions = number(child(item, "divisions"), localDivisions) || localDivisions;
@@ -96,6 +97,10 @@ function parseMeasure(measure, divisions, warnings, partName, tonic, minor) {
     } else if (item.localName === "forward") {
       cursor += number(child(item, "duration")) / localDivisions;
       maxTime = Math.max(maxTime, cursor);
+    } else if (item.localName === "note" && child(item, "grace")) {
+      // Grace notes take no time: their numbers are drawn small before the note they lead into.
+      const pitch = parsePitch(item, tonic, minor);
+      if (pitch) graces.push(pitch);
     } else if (item.localName === "note") {
       const duration = number(child(item, "duration"), 1) / localDivisions;
       const chord = Boolean(child(item, "chord"));
@@ -105,7 +110,10 @@ function parseMeasure(measure, divisions, warnings, partName, tonic, minor) {
       const pitch = rest ? null : parsePitch(item, tonic, minor);
       const sourceMatch = /^svp-n(\d+)-(\d+)-p\d+-v\d+-o\d+-m\d+-s\d+$/u.exec(item.getAttribute('id') || '');
       const previous = events.at(-1);
-      const tuplets = children(child(item, "notations") ?? document.createElement("div"), "tuplet").map((tuplet) => tuplet.getAttribute("type"));
+      const notations = child(item, "notations") ?? document.createElement("div");
+      const tupletNodes = children(notations, "tuplet");
+      const tuplets = tupletNodes.map((tuplet) => tuplet.getAttribute("type"));
+      const tupletOpening = tupletNodes.find((tuplet) => tuplet.getAttribute("type") === "start");
       events.push({
         // Chord members share the onset of the note before them and are stacked above it. Rounding keeps triplet onsets
         // equal across parts, whatever order their thirds were summed in.
@@ -119,10 +127,15 @@ function parseMeasure(measure, divisions, warnings, partName, tonic, minor) {
         lyric: lyricText(item),
         sourceTrackIndex: sourceMatch ? Number(sourceMatch[1]) : null,
         sourceNoteIndex: sourceMatch ? Number(sourceMatch[2]) : null,
-        ties: [...children(item, "tie"), ...children(child(item, "notations") ?? document.createElement("div"), "tied")].map((tie) => tie.getAttribute("type")),
+        ties: [...children(item, "tie"), ...children(notations, "tied")].map((tie) => tie.getAttribute("type")),
+        slurs: children(notations, "slur").map((slur) => slur.getAttribute("type")),
+        slides: children(notations, "slide").map((slide) => slide.getAttribute("type")),
+        graces: chord ? [] : graces.splice(0),
         beams: Object.fromEntries(children(item, "beam").map((beam) => [Number(beam.getAttribute("number")), beam.textContent.trim()])),
         tupletStart: tuplets.includes("start"),
         tupletStop: tuplets.includes("stop"),
+        tupletBracket: tupletOpening?.getAttribute("bracket") !== "no",
+        tupletNumber: tupletOpening?.getAttribute("show-number") !== "none",
         chord,
       });
       if (!chord) cursor += duration;
@@ -269,6 +282,12 @@ function drawNote(svg, event, x, y, slotWidth, { fontFamily, lyricFontSize, sour
   if (event.rest) {
     text(svg, "0", { x: centerX, y, "text-anchor": "middle", class: "jianpu-note", "font-family": fontFamily });
   } else if (event.pitch) {
+    // Grace notes: small numbers before the note, each with its own octave dots.
+    (event.graces ?? []).forEach((grace, index, graces) => {
+      const graceX = centerX - 10 - (graces.length - 1 - index) * 8;
+      text(svg, grace.label, { x: graceX, y: y - 14, "text-anchor": "end", class: "jianpu-grace", "font-family": fontFamily });
+      for (let i = 0; i < Math.abs(grace.octaveShift); i += 1) el("circle", { cx: graceX - 3.5, cy: grace.octaveShift > 0 ? y - 26 - i * 3.5 : y - 10 + i * 3.5, r: 1.1, class: "jianpu-octave-dot" }, svg);
+    });
     text(svg, event.pitch.label, { x: centerX, y, "text-anchor": "middle", class: "jianpu-note", "font-family": fontFamily });
     const dots = Math.abs(event.pitch.octaveShift);
     for (let i = 0; i < dots; i += 1) {
@@ -344,25 +363,28 @@ function drawBeamedLines(svg, drawn, y) {
   }
 }
 
-// A triplet group gets a small bracket above it with a 3 in the middle, clear of ties and high octave dots.
+// A triplet group gets a small bracket above it with a 3 in the middle, clear of ties and high octave dots. The score's
+// tuplet marks may leave out the bracket (the 3 alone) or, for a repeated rhythm, both.
 function drawTuplets(svg, drawn, y) {
   let run = null;
   for (const item of drawn) {
     if (item.event.tupletStart) run = [item];
     else if (run) run.push(item);
     if (!item.event.tupletStop || !run) continue;
+    const { tupletBracket, tupletNumber } = run[0].event;
     const highOctaveDots = Math.max(0, ...run.map(({ event }) => event.pitch?.octaveShift ?? 0));
     const top = y - 38 - highOctaveDots * 5, left = run[0].x - 7, right = item.x + 7, middle = (left + right) / 2;
-    el("path", { d: `M ${left} ${top + 4} V ${top} H ${middle - 6} M ${middle + 6} ${top} H ${right} V ${top + 4}`, class: "jianpu-tuplet" }, svg);
-    text(svg, "3", { x: middle, y: top + 4, "text-anchor": "middle", class: "jianpu-tuplet-number" });
+    if (tupletBracket) el("path", { d: tupletNumber ? `M ${left} ${top + 4} V ${top} H ${middle - 6} M ${middle + 6} ${top} H ${right} V ${top + 4}` : `M ${left} ${top + 4} V ${top} H ${right} V ${top + 4}`, class: "jianpu-tuplet" }, svg);
+    if (tupletNumber) text(svg, "3", { x: middle, y: top + 4, "text-anchor": "middle", class: "jianpu-tuplet-number" });
     run = null;
   }
 }
 
-function drawTie(svg, x1, x2, y, octaveShift = 0) {
+// Ties and slurs are both arcs over the numbers; a slur sits a little higher so a tie inside it stays visible.
+function drawTie(svg, x1, x2, y, octaveShift = 0, lift = 0) {
   if (x2 <= x1 + 2) return;
   const rise = Math.min(18, Math.max(8, (x2 - x1) * 0.08));
-  const offsetY = y - 17 - Math.max(0, octaveShift) * 6;
+  const offsetY = y - 17 - Math.max(0, octaveShift) * 6 - lift;
   el("path", { d: `M ${x1} ${offsetY} Q ${(x1 + x2) / 2} ${offsetY - rise} ${x2} ${offsetY}`, class: "jianpu-tie" }, svg);
 }
 
@@ -406,7 +428,7 @@ export async function renderJianpu(xml, container, {
   const pageCount = Math.max(1, Math.ceil(systems.length / systemsPerPage));
   const svgs = [];
   const eventPositions = new Map();
-  const styleText = `.jianpu-note{font-size:24px;fill:#111}.jianpu-lyric{font-size:${safeLyricFontSize}px;fill:#333}.jianpu-rhythm,.jianpu-tie{stroke:#111;stroke-width:1.5;fill:none}.jianpu-tuplet{stroke:#111;stroke-width:1;fill:none}.jianpu-tuplet-number{font-size:11px;font-style:italic;fill:#111}.jianpu-sustain{font-size:20px;fill:#111}.jianpu-dot,.jianpu-octave-dot{fill:#111}.jianpu-bar{stroke:#888;stroke-width:1}.jianpu-label{font-size:14px;fill:#222}.jianpu-system-change{font-size:12px;fill:#444}.jianpu-annotation{fill:#4b5563}.jianpu-measure{font-size:12px;fill:#777}.jianpu-page{display:block;max-width:100%;height:auto;margin:0 auto 18px}@media print{@page{size:A4 portrait;margin:10mm}.jianpu-page{width:190mm;height:auto;max-width:none;margin:0;break-after:page;page-break-after:always}.jianpu-page:last-of-type{break-after:auto;page-break-after:auto}}`;
+  const styleText = `.jianpu-note{font-size:24px;fill:#111}.jianpu-lyric{font-size:${safeLyricFontSize}px;fill:#333}.jianpu-rhythm,.jianpu-tie{stroke:#111;stroke-width:1.5;fill:none}.jianpu-tuplet,.jianpu-slide{stroke:#111;stroke-width:1;fill:none}.jianpu-grace{font-size:12px;fill:#111}.jianpu-tuplet-number{font-size:11px;font-style:italic;fill:#111}.jianpu-sustain{font-size:20px;fill:#111}.jianpu-dot,.jianpu-octave-dot{fill:#111}.jianpu-bar{stroke:#888;stroke-width:1}.jianpu-label{font-size:14px;fill:#222}.jianpu-system-change{font-size:12px;fill:#444}.jianpu-annotation{fill:#4b5563}.jianpu-measure{font-size:12px;fill:#777}.jianpu-page{display:block;max-width:100%;height:auto;margin:0 auto 18px}@media print{@page{size:A4 portrait;margin:10mm}.jianpu-page{width:190mm;height:auto;max-width:none;margin:0;break-after:page;page-break-after:always}.jianpu-page:last-of-type{break-after:auto;page-break-after:auto}}`;
   for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
     const pageSystems = systems.slice(pageIndex * systemsPerPage, (pageIndex + 1) * systemsPerPage);
     const pageHeight = maxPageHeight;
@@ -465,8 +487,27 @@ export async function renderJianpu(xml, container, {
   }
 
   const allSystemRows = systems;
+  // An arc from one drawn note to another, continued across system breaks.
+  const drawArc = (start, position, partIndex, octaveShift, lift = 0) => {
+    const fromSystem = allSystemRows.indexOf(start.system);
+    const toSystem = allSystemRows.indexOf(position.system);
+    if (fromSystem === toSystem) {
+      drawTie(position.system.svg, start.x + 8, position.x - 8, position.y, octaveShift, lift);
+      return;
+    }
+    for (let systemIndex = fromSystem; systemIndex <= toSystem; systemIndex += 1) {
+      const system = allSystemRows[systemIndex];
+      const y = system.top + voiceOffset + partIndex * partSpacing;
+      const left = margin + 100;
+      const right = pageWidth - margin - 8;
+      const x1 = systemIndex === fromSystem ? start.x + 8 : left;
+      const x2 = systemIndex === toSystem ? position.x - 8 : right;
+      drawTie(system.svg, x1, x2, y, octaveShift, lift);
+    }
+  };
   for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
     const activeTies = new Map();
+    let slur = null, slide = null;
     for (const measure of measures) {
       for (const event of measure.lines[partIndex]?.events ?? []) {
         if (!event.pitch) continue;
@@ -474,26 +515,22 @@ export async function renderJianpu(xml, container, {
         const position = eventPositions.get(event);
         if (event.ties.includes("stop")) {
           const start = activeTies.get(key);
-          if (start && position) {
-            const fromSystem = allSystemRows.indexOf(start.system);
-            const toSystem = allSystemRows.indexOf(position.system);
-            if (fromSystem === toSystem) {
-              drawTie(position.system.svg, start.x + 8, position.x - 8, position.y, event.pitch.octaveShift);
-            } else {
-              for (let systemIndex = fromSystem; systemIndex <= toSystem; systemIndex += 1) {
-                const system = allSystemRows[systemIndex];
-                const y = system.top + voiceOffset + partIndex * partSpacing;
-                const left = margin + 100;
-                const right = pageWidth - margin - 8;
-                const x1 = systemIndex === fromSystem ? start.x + 8 : left;
-                const x2 = systemIndex === toSystem ? position.x - 8 : right;
-                drawTie(system.svg, x1, x2, y, event.pitch.octaveShift);
-              }
-            }
-          }
+          if (start && position) drawArc(start, position, partIndex, event.pitch.octaveShift);
           activeTies.delete(key);
         }
         if (event.ties.includes("start") && position) activeTies.set(key, position);
+        if (event.slurs.includes("stop") && slur && position) {
+          drawArc(slur.position, position, partIndex, Math.max(slur.octaveShift, event.pitch.octaveShift), 6);
+          slur = null;
+        }
+        if (event.slurs.includes("start") && position) slur = { position, octaveShift: event.pitch.octaveShift };
+        if (event.slides.includes("stop") && slide && position && slide.position.system === position.system) {
+          // A glide: a short straight line from one number toward the next, rising or falling with the pitch.
+          const rise = Math.sign(event.pitch.midi - slide.midi) * 4;
+          el("line", { x1: slide.position.x + 13, y1: slide.position.y - 8 + rise, x2: position.x - 9, y2: position.y - 8 - rise, class: "jianpu-slide" }, position.system.svg);
+        }
+        if (event.slides.includes("stop")) slide = null;
+        if (event.slides.includes("start") && position) slide = { position, midi: event.pitch.midi };
       }
     }
   }
