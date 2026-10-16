@@ -74,6 +74,14 @@ function timestamp(value) {
   return 0;
 }
 
+/**
+ * Brings settings saved by older versions up to date. Projects saved before notation styles stored the old default
+ * merge level 'low' as their own setting; they move to automatic merging like new projects.
+ */
+export function upgradeSettings(settings = {}) {
+  return settings.glides === undefined && settings.noteMerge === 'low' ? { ...settings, noteMerge: 'auto' } : settings;
+}
+
 export function loadDocuments() {
   return transact('readonly', (store, setResult) => {
     const request = store.getAll();

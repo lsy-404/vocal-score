@@ -7,7 +7,7 @@ import {renderStaffScore} from './lib/staff.js';
 import {analyzeScore,estimateKeys,recommendTranspose} from './lib/analysis.js';
 import {annotateScore,annotateSingers,scoreMetadata,singerPartLabels} from './lib/annotations.js';
 import {decoratePages} from './lib/page-layout.js';
-import {loadDocuments,saveDocument,deleteDocument} from './lib/storage.js';
+import {loadDocuments,saveDocument,deleteDocument,upgradeSettings} from './lib/storage.js';
 import {createPdf,getPaperDimensions,warmPdfWorker} from './lib/pdf.js';
 import {warmLyricAlignment} from './lib/lyric-worker.js';
 import {collectScoreTextTargets,applyScoreTextEdit} from './lib/score-text.js';
@@ -249,7 +249,7 @@ async function prepare(id,label,task){
 }
 // Saved projects are restored and engraved after the start screen, behind the usual progress indicator.
 async function restoreDocuments(){
-  try{const records=await loadDocuments();documents.value=records.map(record=>({...record,settings:{...defaults(),...record.settings},selected:new Set(record.selected),chordChoices:new Map(record.chordChoices)}));activeId.value=documents.value[0]?.id||'';storageMessage(documents.value.length?'已保存在此浏览器':'文件和设置保存在当前浏览器');}
+  try{const records=await loadDocuments();documents.value=records.map(record=>({...record,settings:{...defaults(),...upgradeSettings(record.settings)},selected:new Set(record.selected),chordChoices:new Map(record.chordChoices)}));activeId.value=documents.value[0]?.id||'';storageMessage(documents.value.length?'已保存在此浏览器':'文件和设置保存在当前浏览器');}
   catch{storageMessage('无法读取浏览器存储；请检查浏览器的数据权限。',true);}
   ready.value=true;
   if(current.value)scheduleRender(false);
