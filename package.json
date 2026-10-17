@@ -1,0 +1,32 @@
+{
+  "name": "vocal-score",
+  "private": true,
+  "version": "0.1.0",
+  "license": "AGPL-3.0-or-later",
+  "packageManager": "pnpm@10.34.6",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "node --test test/*.test.js test/importers/*.test.js",
+    "check": "pnpm run build && pnpm run test",
+    "preview": "node test/server.js"
+  },
+  "dependencies": {
+    "fflate": "0.8.3",
+    "fzstd": "0.1.1",
+    "jspdf": "4.2.1",
+    "pinyin-pro": "3.29.5",
+    "vue": "3.5.44",
+    "vue-i18n": "11.4.14",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.10",
+    "@xmldom/xmldom": "0.9.12",
+    "vite": "8.3.4"
+  }
+}

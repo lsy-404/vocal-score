@@ -1,0 +1,2 @@
+* text=auto eol=lf
+public/vendor/*.min.js -whitespace
