@@ -2,6 +2,8 @@
 
 在浏览器本地读取歌声合成、MIDI 与 FL Studio 工程，生成带歌词的五线谱与简谱或器乐总谱，直接预览和下载 PDF。原路径 `projects/vocal-score/` 保持不变。
 
+开源协议：GNU Affero General Public License v3.0 或更新版本（[LICENSE](LICENSE)）。源代码：<https://github.com/lsy-404/tiny/tree/main/apps/vocal-score>。
+
 在仓库根目录使用 Node.js 22.13 或更新版本与 pnpm 10.34.6：
 
 ```sh
@@ -41,10 +43,20 @@ pnpm check
 - 按纸张连续预览排版页面并直接下载 PDF，支持 A4、Letter、Legal、A3、A5 和横竖方向；也可导出 MusicXML 与谱面 SVG。
 - 使用 Platform Kit Fluent 的样式包，支持浅色和深色外观。
 
-五线谱支持同轨复音；简谱暂要求每个输出声部内没有重叠音符。转换不生成歌声音频，也不修改磁盘上的原始工程。预览直接显示矢量谱面，页边与缩放和 PDF 一致；下载时按 220 DPI 生成 PDF 页面图像，PDF 内文字不可搜索，需要可编辑或矢量内容时可导出 MusicXML 或 SVG。所有工程、原始文件副本和设置仅保存在当前浏览器，不会上传到服务器。
+最后一小节以终止线结束（五线谱与简谱）。可导入 512 MB 以内的 FL Studio 工程，其他格式 100 MB 以内。声乐连线画在谱表上方；花腔延续到新一行而该行没有歌词文字时，五线谱仍保留歌词行，延长线不会压到音符或下一行谱表（只影响显示，导出的 MusicXML 不变）。五线谱支持同轨复音；简谱暂要求每个输出声部内没有重叠音符。转换不生成歌声音频，也不修改磁盘上的原始工程。预览直接显示矢量谱面，页边与缩放和 PDF 一致；下载时按 220 DPI 生成 PDF 页面图像，PDF 内文字不可搜索，需要可编辑或矢量内容时可导出 MusicXML 或 SVG。所有工程、原始文件副本和设置仅保存在当前浏览器，不会上传到服务器。
 
 完整验证：`pnpm check`。设置 `SVP_SAMPLE_FILES` 为以分号分隔的本地 `.svp` 文件路径可增加真实工程转换验证。`test/vocal-score/formats.browser.mjs` 在浏览器里导入各格式，`FORMAT_SAMPLE_FILES`（分号分隔，任意支持格式）可加入本地真实工程；`FLP_SAMPLE_DIR` 指定 FL Studio 样本目录。样本只在本地读取，不进入仓库。浏览器回归脚本位于仓库根目录 `test/vocal-score/`，通过外部安装的 Playwright 执行；使用 `PLAYWRIGHT_MODULE` 指定 Playwright 模块，使用 `PREVIEW_URL` 指向已构建门户中的 `/projects/vocal-score/` 页面。
 
 致谢：感谢奥莉安多提供的样本数据和改善建议。
 
-第三方许可位于 `public/vendor/`，构建后也包含在 `dist/vendor/`。原始用户工程和生成的歌曲文件不进入源代码或部署资源。
+第三方许可位于 `public/vendor/`（总览见 `THIRD-PARTY.txt`），构建后也包含在 `dist/projects/vocal-score/vendor/`，界面侧栏底部有链接。原始用户工程和生成的歌曲文件不进入源代码或部署资源。
+
+## 许可与源代码
+
+织音机 Copyright (C) 2026 lsy-404
+
+本程序是自由软件：你可以依照自由软件基金会发布的 GNU Affero 通用公共许可证第 3 版或（由你选择）任何更新版本再发布和/或修改它。发布本程序是希望它有用，但不提供任何担保，甚至不含适销性或特定用途适用性的默示担保。详见 [LICENSE](LICENSE)（AGPL-3.0 英文原文）。
+
+织音机作为网页服务提供，按 AGPL 第 13 条，界面侧栏底部的“织音机源代码”链接指向对应源代码：<https://github.com/lsy-404/tiny/tree/main/apps/vocal-score>。修改后通过网络向他人提供服务时，也需要向这些用户提供修改后的源代码。
+
+所用第三方组件的许可均与 AGPL-3.0 兼容：OpenSheetMusicDisplay（BSD-3-Clause）、Platform Kit Fluent 与改编自 UtaFormatix3 的格式读取（Apache-2.0）、Vue、Vue I18n、Pinyin Pro、jsPDF、fflate、fzstd、Tonal（MIT）、yaml（ISC）；各自的许可全文保留在 `public/vendor/`。`apps/cassie` 等仓库内其他作品不在本许可范围内，保留各自的许可与署名。
