@@ -1,0 +1,171 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>简谱渲染器浏览器验证</title>
+<style>
+  body { font: 15px sans-serif; margin: 1rem; }
+  #result { white-space: pre-wrap; }
+  #score { width: 800px; border: 1px solid #ddd; }
+  #wide { width: 800px; }
+</style>
+<pre id="result">Running browser checks…</pre>
+<div id="score"></div>
+<div id="wide"></div>
+<script type="module">
+  import { renderJianpu } from "/src/lib/jianpu.js";
+  import { decoratePages } from "/src/lib/page-layout.js";
+
+  const assert = (condition, message) => {
+    if (!condition) throw new Error(message);
+  };
+  const makeMeasure = (index, { tieStart = false, tieStop = false, change = false, lyric = "la" } = {}) => {
+    const attributes = change
+      ? `<attributes><divisions>2</divisions><key><fifths>1</fifths><mode>major</mode></key><time><beats>3</beats><beat-type>4</beat-type></time></attributes><direction><sound tempo="90"/></direction>`
+      : index === 1 ? `<attributes><divisions>2</divisions><key><fifths>0</fifths><mode>major</mode></key><time><beats>4</beats><beat-type>4</beat-type></time></attributes>` : "";
+    const half = index === 1;
+    const notes = change
+      ? `<note><pitch><step>C</step><octave>4</octave></pitch><duration>3</duration><type>quarter</type><dot/><lyric><syllabic>single</syllabic><text>${lyric}</text></lyric></note><note><rest/><duration>2</duration><type>quarter</type></note><note><pitch><step>G</step><octave>3</octave></pitch><duration>1</duration><type>eighth</type></note>`
+      : `<note ${index === 1 ? 'id="svp-n0-0-p0-v1-o0-m0-s0"' : ''}><pitch><step>C</step><octave>4</octave></pitch><duration>${half ? 4 : 2}</duration><type>${half ? "half" : "quarter"}</type>${tieStart ? `<tie type="start"/>` : ""}${tieStop ? `<tie type="stop"/>` : ""}<lyric><syllabic>single</syllabic><text>${lyric}</text></lyric></note><note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type></note><note><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type></note><note><pitch><step>F</step><alter>1</alter><octave>4</octave></pitch><duration>2</duration><type>quarter</type></note>`;
+    const annotation = index === 1 ? `<direction placement="above"><direction-type><words font-size="10">A1 / C ? / 和弦为自动推测（?）</words></direction-type><offset>1</offset></direction>` : "";
+    return `<measure number="${index}">${attributes}${annotation}${notes}</measure>`;
+  };
+  const barCount = 102;
+  const measures = Array.from({ length: barCount }, (_, index) => makeMeasure(index + 1, {
+    tieStart: index === 0,
+    tieStop: index === barCount - 1,
+    change: index === 3,
+    lyric: index === 0 ? "&lt;script&gt;safe&lt;/script&gt;" : `la${index + 1}`,
+  })).join("");
+  const otherParts = ["Harmony", "Bass"].map((name, partIndex) => {
+    const note = partIndex ? "G" : "E";
+    const partMeasures = Array.from({ length: barCount }, (_, index) => `<measure number="${index + 1}">${index === 0 ? `<attributes><divisions>2</divisions><key><fifths>0</fifths><mode>major</mode></key><time><beats>4</beats><beat-type>4</beat-type></time></attributes>` : ""}${Array.from({ length: 4 }, () => `<note><pitch><step>${note}</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type></note>`).join("")}</measure>`).join("");
+    return `<part id="P${partIndex + 2}">${partMeasures}</part>`;
+  }).join("");
+  const xml = `<?xml version="1.0"?><score-partwise version="4.0"><work><work-title>Fixture Score</work-title></work><part-list><score-part id="P1"><part-name>Lead</part-name></score-part><score-part id="P2"><part-name>Harmony</part-name></score-part><score-part id="P3"><part-name>Bass</part-name></score-part></part-list><part id="P1">${measures}</part>${otherParts}</score-partwise>`;
+  try {
+    const container = document.querySelector("#score");
+    const model = { tracks: [{ id: "lead-id", notes: [{ sourceTrackIndex: 0, sourceNoteIndex: 0, sourceTrackId: "lead-id" }] }] };
+    const { svg, svgs, warnings } = await renderJianpu(xml, container, { width: 320, model });
+    assert(svg === svgs[0], "svg must remain the first-page export handle");
+    assert(svgs.length === 34, `expected 34 bounded pages for 102 bars, received ${svgs.length}`);
+    assert(svgs.every((page) => page.viewBox.baseVal.width === 320), "page width must stay within the requested width");
+    assert(svgs.every((page) => [...page.querySelectorAll(".jianpu-bar")].every((bar) => Number(bar.getAttribute("x2")) <= 296)), "measure systems must not overflow the page width");
+    assert(svgs.every((page) => [...page.querySelectorAll(".jianpu-note")].every((note) => {
+      const bounds = note.getBBox();
+      const nextBar = [...page.querySelectorAll(".jianpu-bar")].map((bar) => Number(bar.getAttribute("x2"))).filter((x) => x >= bounds.x).sort((a, b) => a - b)[0];
+      return nextBar === undefined || bounds.x + bounds.width <= nextBar + 1;
+    })), "note glyphs must stay inside their measure bars");
+    assert(container.textContent.includes("Fixture Score"), "title must be rendered");
+    const mappedLyric = container.querySelector('[data-edit-kind="lyric"]');
+    assert(mappedLyric?.getAttribute("data-track-id") === "lead-id" && mappedLyric.getAttribute("data-note-index") === "0", "numbered-score lyric targets must retain exact note identity");
+    assert(container.querySelector('[data-edit-kind="track-name"][data-track-id="lead-id"]')?.textContent === "Lead", "numbered-score part labels must map to their source track");
+    const marker = container.querySelector(".jianpu-annotation");
+    assert(marker?.textContent === "A1 / C ? / 和弦为自动推测（?）", "analysis words must render as safe SVG text");
+    const markerBounds = marker.getBBox();
+    const markerSystem = marker.closest("svg");
+    const nearestNote = [...markerSystem.querySelectorAll(".jianpu-note")].map((note) => note.getBBox()).sort((a, b) => Math.abs(a.x - markerBounds.x) - Math.abs(b.x - markerBounds.x))[0];
+    assert(markerBounds.y + markerBounds.height < nearestNote.y, "analysis words must have a separate row above the voice notes");
+    assert(markerBounds.x > 24 && markerBounds.x < 296, "analysis offset must position annotation within the measure system");
+    assert(container.textContent.includes("1=G") && container.textContent.includes("3/4") && container.textContent.includes("♩=90"), "mid-score key, meter, and tempo changes must be shown");
+    assert(svgs.every((page) => ["Lead", "Harmony", "Bass"].every((name) => page.textContent.includes(name))), "each voice label must be shown on every system");
+    assert(container.querySelectorAll(".jianpu-tie").length >= 3, "ties crossing system and page breaks must be split into connected arcs");
+    assert(container.querySelectorAll(".jianpu-sustain").length === 1, "half notes must receive exactly one sustain dash");
+    assert(container.querySelectorAll(".jianpu-dot").length >= 1, "dotted note marker must be rendered once");
+    assert([...container.querySelectorAll(".jianpu-note")].some((note) => note.textContent === "0"), "rests must render as 0");
+    const lowDot = container.querySelector(".jianpu-octave-dot");
+    const beatLine = container.querySelector(".jianpu-rhythm");
+    assert(Number(beatLine.getAttribute("y1")) > Number(lowDot.getAttribute("cy")) + 2, "rhythm underlines must clear low-octave dots");
+    assert(container.querySelectorAll("script").length === 0, "lyrics must never become markup");
+    assert(container.textContent.includes("<script>safe<\/script>"), "escaped lyric content must survive as visible text");
+    assert(warnings.length === 0, "single-voice fixture should not generate warnings");
+    const wide = await renderJianpu(xml, document.querySelector("#wide"), { width: 800 });
+    assert(wide.svgs.length === 18, `dense and sparse measures should pack by measured width; received ${wide.svgs.length} wide pages`);
+    assert(wide.svgs.every((page) => page.viewBox.baseVal.width === 800), "wide score must preserve the requested width");
+    const backupXml = xml.replace("</measure>", "<backup><duration>2</duration></backup></measure>");
+    let overlapRejected = false;
+    try {
+      await renderJianpu(backupXml, document.createElement("div"), { width: 800 });
+    } catch (error) {
+      overlapRejected = /multiple voices/.test(error.message);
+    }
+    assert(overlapRejected, "overlapping backup timing must fail explicitly instead of drawing colliding notes");
+    const optionsContainer = document.createElement("div");
+    const options = await renderJianpu(xml, optionsContainer, {
+      width: 800, fontFamily: "KaiTi, STKaiti, serif", lyricFontSize: 18,
+      showMeasureNumbers: false, showPageNumbers: false, drawTitle: false,
+    });
+    assert(!optionsContainer.textContent.includes("Fixture Score"), "drawTitle=false hides the renderer title");
+    assert(optionsContainer.querySelectorAll(".jianpu-measure").length === 0, "number options hide bar and page labels");
+    assert(optionsContainer.querySelector(".jianpu-lyric").getAttribute("font-size") === "18", "lyric font size is applied");
+    assert(optionsContainer.querySelector(".jianpu-note").getAttribute("font-family") === "KaiTi, STKaiti, serif", "selected font family is applied as a safe SVG attribute");
+    const beforeHeight = options.svg.viewBox.baseVal.height;
+    decoratePages(optionsContainer, { header: "Page <script>", by: "Test Author", showPageNumbers: true, fontFamily: "KaiTi, serif", titleFontSize: 20 });
+    assert(optionsContainer.querySelectorAll(".page-decoration").length === options.svgs.length, "each page receives its own decoration group");
+    assert(optionsContainer.querySelectorAll(".page-decoration text").length === options.svgs.length * 2 + 1, "headers and page numbers render on every page, with one first-page byline");
+    assert(options.svg.viewBox.baseVal.height > beforeHeight, "page decoration reserves vertical layout space");
+    assert(optionsContainer.textContent.includes("Page <script>"), "header content is rendered as text");
+    assert(optionsContainer.querySelectorAll("script").length === 0, "header cannot inject markup");
+    const decoratedHeight = options.svg.viewBox.baseVal.height;
+    decoratePages(optionsContainer, { header: "Page <script>", by: "Test Author", showPageNumbers: true, fontFamily: "KaiTi, serif", titleFontSize: 20 });
+    assert(options.svg.viewBox.baseVal.height === decoratedHeight, "reapplying decoration does not expand page geometry repeatedly");
+    const nestedContainer = document.createElement("div");
+    for (let index = 0; index < 2; index += 1) {
+      const wrapper = document.createElement("div");
+      const page = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      page.setAttribute("viewBox", "0 0 600 800");
+      const innerSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      innerSvg.setAttribute("viewBox", "0 0 20 20");
+      page.append(innerSvg);
+      wrapper.append(page);
+      nestedContainer.append(wrapper);
+    }
+    const nestedPages = decoratePages(nestedContainer, {
+      title: "Centered Score Title", header: "Running Header", by: "Composer",
+      fontFamily: "KaiTi, serif", headerFontSize: 12, titleFontSize: 22,
+    });
+    assert(nestedPages.length === 2, "nested OSMD SVG pages inside div wrappers are discovered");
+    assert(nestedContainer.querySelectorAll(".page-decoration").length === 2, "only top-level score SVGs receive decoration");
+    const firstPageText = [...nestedPages[0].querySelectorAll(":scope > .page-decoration > text")];
+    const laterPageText = [...nestedPages[1].querySelectorAll(":scope > .page-decoration > text")];
+    assert(firstPageText.some((node) => node.textContent === "Centered Score Title" && node.getAttribute("text-anchor") === "middle"), "first page title is centered");
+    assert(firstPageText.some((node) => node.textContent === "by Composer"), "byline appears on the first page");
+    assert(laterPageText.some((node) => node.textContent === "Running Header"), "running header appears on each page");
+    assert(!laterPageText.some((node) => node.textContent === "Centered Score Title" || node.textContent === "by Composer"), "title and byline do not repeat on later pages");
+    assert(nestedContainer.querySelectorAll("svg svg .page-decoration").length === 0, "nested notation SVGs remain untouched");
+    assert(nestedPages[0].viewBox.baseVal.height > 800, "title and byline reserve enough first-page space");
+    const firstDecoratedHeight = nestedPages[0].viewBox.baseVal.height;
+    decoratePages(nestedContainer, { title: "Centered Score Title", header: "Running Header", by: "Composer", fontFamily: "KaiTi, serif", headerFontSize: 12, titleFontSize: 22 });
+    assert(nestedPages[0].viewBox.baseVal.height === firstDecoratedHeight, "nested page decoration remains idempotent");
+    const scaledContainer = document.createElement("div");
+    const scaledPage = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    scaledPage.setAttribute("width", "850");
+    scaledPage.setAttribute("height", "1190");
+    scaledPage.setAttribute("viewBox", "0 0 1000 1400");
+    scaledContainer.append(scaledPage);
+    decoratePages(scaledContainer, { title: "Scaled OSMD Page", by: "Composer" });
+    const expandedViewHeight = scaledPage.viewBox.baseVal.height;
+    const expandedHeight = Number(scaledPage.getAttribute("height"));
+    assert(scaledPage.getAttribute("width") === "850", "decorating preserves the OSMD page width");
+    assert(Math.abs(expandedHeight - 1190 * expandedViewHeight / 1400) < 0.001, "rendered height scales with the expanded viewBox while retaining OSMD scale");
+    assert(Math.abs(850 / 1000 - expandedHeight / expandedViewHeight) < 0.001, "rendered width and height keep the same scale against the viewBox");
+    decoratePages(scaledContainer, { title: "Scaled OSMD Page", by: "Composer" });
+    assert(Math.abs(Number(scaledPage.getAttribute("height")) - expandedHeight) < 0.001, "scaled height does not accumulate across repeated decoration");
+    const triplet = (step, duration, type, extra = "") => `<note><pitch><step>${step}</step><octave>4</octave></pitch><duration>${duration}</duration><type>${type}</type><time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification>${extra}</note>`;
+    const tripletXml = `<?xml version="1.0"?><score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Lead</part-name></score-part></part-list><part id="P1"><measure number="1"><attributes><divisions>3</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time></attributes>${triplet("C", 1, "eighth", '<beam number="1">begin</beam><notations><tuplet type="start" bracket="yes"/></notations>')}${triplet("D", 1, "eighth", '<beam number="1">continue</beam>')}${triplet("E", 1, "eighth", '<beam number="1">end</beam><notations><tuplet type="stop"/></notations>')}${triplet("F", 2, "quarter", '<notations><tuplet type="start" bracket="yes"/></notations>')}${triplet("G", 1, "eighth", '<notations><tuplet type="stop"/></notations>')}<note><pitch><step>A</step><octave>4</octave></pitch><duration>6</duration><type>half</type></note></measure></part></score-partwise>`;
+    const tripletContainer = document.createElement("div");
+    document.body.append(tripletContainer);
+    await renderJianpu(tripletXml, tripletContainer, { width: 800 });
+    const numbers = [...tripletContainer.querySelectorAll(".jianpu-tuplet-number")];
+    assert(numbers.length === 2 && numbers.every((number) => number.textContent === "3"), "each triplet group is marked with a 3");
+    assert(tripletContainer.querySelectorAll(".jianpu-tuplet").length === 2, "each triplet group gets one bracket");
+    const tripletNotes = [...tripletContainer.querySelectorAll(".jianpu-note")].map((note) => note.getBBox());
+    const firstBracket = tripletContainer.querySelector(".jianpu-tuplet").getBBox();
+    assert(firstBracket.x <= tripletNotes[0].x && firstBracket.x + firstBracket.width >= tripletNotes[2].x + tripletNotes[2].width, "the bracket spans its three notes");
+    assert(firstBracket.y + firstBracket.height < Math.min(...tripletNotes.map((note) => note.y)), "the bracket sits above the notes");
+    assert(tripletContainer.querySelectorAll(".jianpu-rhythm").length === 2, "triplet eighths share one underline; the lone eighth keeps its own");
+    tripletContainer.remove();
+    document.querySelector("#result").textContent = "PASS: 102 bars and three voices, width-bounded packing, title and voice labels, annotations and musical changes, cross-page ties, rhythm marks, triplet brackets, font and number options, safe lyrics and page decoration, and overlap rejection.";
+  } catch (error) {
+    document.querySelector("#result").textContent = `FAIL: ${error.message}`;
+    throw error;
+  }
+</script>

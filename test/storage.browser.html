@@ -1,0 +1,49 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>本地文档存储验证</title>
+<pre id="result">验证中…</pre>
+<script type="module">
+  import {deleteDocument,loadDocuments,saveDocument} from '/src/lib/storage.js';
+  const assert=(condition,message)=>{if(!condition)throw new Error(message);};
+  const result=document.querySelector('#result');
+  const id='fixture-"<>雪/record';
+  const olderId='fixture-older';
+  const verify=new URLSearchParams(location.search).has('verify');
+  try {
+    if(!verify){
+      await deleteDocument(id);
+      await deleteDocument(olderId);
+      await saveDocument({id:olderId,name:'Earlier',project:{tracks:[]},sourceFile:new Blob(['old'],{type:'text/plain'}),settings:{key:0},updatedAt:100});
+      const source='source bytes\r\n声音';
+      const record={
+        id,
+        name:'Sheet <&> "雪"',
+        project:{title:'Title <&> "雪"',tracks:[{id:'voice',name:'测试',notes:[{onset:12,duration:34,pitch:60,lyrics:'歌词 <&> "\' 雪'}]}]},
+        sourceFile:new Blob([source],{type:'application/x-test-svp'}),
+        settings:{title:'<&> "雪"',selected:['voice'],nested:{flag:true}},
+        updatedAt:200
+      };
+      await saveDocument(record);
+      const records=await loadDocuments();
+      const stored=records.find(item=>item.id===id);
+      assert(records.findIndex(item=>item.id===id)<records.findIndex(item=>item.id===olderId),'records must be returned newest first');
+      assert(stored!==record&&stored.project!==record.project,'loaded values must be structured clones');
+      assert(stored.name===record.name&&stored.project.tracks[0].notes[0].lyrics===record.project.tracks[0].notes[0].lyrics,'special strings and nested data must survive');
+      assert(stored.sourceFile instanceof Blob&&stored.sourceFile.type==='application/x-test-svp'&&await stored.sourceFile.text()===source,'Blob bytes and MIME type must survive');
+      await deleteDocument(olderId);
+      assert(!(await loadDocuments()).some(item=>item.id===olderId),'delete must remove its record');
+      result.textContent='PASS: structured clone, special text, Blob bytes and MIME type, updated ordering, and deletion.';
+    } else {
+      const records=await loadDocuments();
+      const stored=records.find(item=>item.id===id);
+      assert(stored,'record should persist after closing and reopening the page');
+      assert(stored.name==='Sheet <&> "雪"'&&stored.settings.nested.flag,'settings and names should persist across reload');
+      assert(await stored.sourceFile.text()==='source bytes\r\n声音','Blob contents should persist across reload');
+      assert(!records.some(item=>item.id===olderId),'deleted record must remain deleted after reload');
+      result.textContent='PASS: persisted document and settings after page reload; deletion remains durable.';
+    }
+  } catch(error) {
+    result.textContent=`FAIL: ${error.message}`;
+    throw error;
+  }
+</script>

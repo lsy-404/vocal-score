@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Staff layout browser checks</title>
+<div id="result">Running…</div>
+<div id="score"></div>
+<script src="/vendor/opensheetmusicdisplay.min.js"></script>
+<script type="module">
+  import { createScore, parseSvp, QUARTER } from '/src/lib/converter.js';
+  import { decoratePages } from '/src/lib/page-layout.js';
+  import { renderStaffScore } from '/src/lib/staff.js';
+
+  const result = document.querySelector('#result');
+  const assert = (condition, message) => { if (!condition) throw new Error(message); };
+  try {
+    const geometry = document.createElement('div');
+    const noViewBox = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    noViewBox.setAttribute('width', '210mm'); noViewBox.setAttribute('height', '297mm');
+    geometry.append(noViewBox);
+    const decorated = decoratePages(geometry, { title: 'Page title', header: 'Header', by: 'Author' });
+    const base = noViewBox.getAttribute('data-base-viewbox').split(' ').map(Number);
+    assert(decorated.length === 1 && Math.abs(base[2] / base[3] - 210 / 297) < 0.002, 'fallback viewBox must preserve SVG physical dimensions');
+    assert(noViewBox.querySelector('[data-edit-kind="title"]')?.textContent === 'Page title', 'title must be marked as editable text');
+    assert(noViewBox.querySelector('[data-edit-kind="header"]')?.textContent === 'Header', 'header must be marked as editable text');
+    assert(noViewBox.querySelector('[data-edit-kind="by"]')?.textContent === 'by Author', 'author line must be marked as editable text');
+    const invalid = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const badContainer = document.createElement('div'); badContainer.append(invalid);
+    let invalidRejected = false;
+    try { decoratePages(badContainer); } catch (error) { invalidRejected = error instanceof TypeError; }
+    assert(invalidRejected, 'SVG without a viewBox or dimensions must fail clearly');
+
+    const measureCount = 8;
+    const sourceTracks = [
+      { id: 'voice-a', name: 'same', pitch: 60 },
+      { id: 'voice-b', name: 'Harmony', pitch: 64 },
+    ];
+    const project = parseSvp(JSON.stringify({
+      projectName: 'Layout check', version: 153,
+      time: { tempo: [{ position: 0, bpm: 120 }], meter: [{ index: 0, numerator: 4, denominator: 4 }] },
+      tracks: sourceTracks.map((sourceTrack) => ({
+        name: sourceTrack.name,
+        mainGroup: { uuid: sourceTrack.id, notes: Array.from({ length: measureCount }, (_, sourceNoteIndex) => ({
+          onset: sourceNoteIndex * QUARTER * 4,
+          duration: QUARTER,
+          pitch: sourceTrack.pitch,
+          lyrics: 'same',
+        })) },
+        groups: [],
+      })),
+    }));
+    const converted = createScore(project);
+    const score = document.querySelector('#score');
+    const { osmd } = await renderStaffScore(score, converted.xml, { model: converted.model });
+    const targets = [...score.querySelectorAll('[data-edit-kind="lyric"]')];
+    assert(osmd.Zoom === 1, 'staff renderer must use native page scale');
+    assert(targets.length === measureCount * sourceTracks.length, `all ${measureCount} measures across both parts must have mapped lyrics, received ${targets.length}`);
+    for (const sourceTrack of sourceTracks) {
+      const trackTargets = targets.filter(node => node.getAttribute('data-track-id') === sourceTrack.id);
+      assert(trackTargets.length === measureCount, `all lyrics must map to ${sourceTrack.id}`);
+      assert(new Set(trackTargets.map(node => node.getAttribute('data-note-index'))).size === measureCount, `repeated pitch and lyric text must retain distinct note indices for ${sourceTrack.id}`);
+      assert(trackTargets.every(node => Number(node.getAttribute('data-note-index')) >= 0 && Number(node.getAttribute('data-note-index')) < measureCount), `source note indices must remain in range for ${sourceTrack.id}`);
+    }
+    osmd.graphic.MeasureList.forEach((measureStaves, measureIndex) => {
+      for (const graphicalMeasure of measureStaves) {
+        const partMatch = /^P(\d+)$/u.exec(graphicalMeasure.ParentStaff.ParentInstrument.IdString);
+        const sourceTrack = sourceTracks[Number(partMatch[1]) - 1];
+        for (const entry of graphicalMeasure.staffEntries) {
+          for (const voice of entry.graphicalVoiceEntries) {
+            for (const note of voice.notes) {
+              for (const lyricNode of note.getLyricsSVGs()) {
+                assert(lyricNode.getAttribute('data-track-id') === sourceTrack.id, 'measure staff must map to its instrument track');
+                assert(lyricNode.getAttribute('data-note-index') === String(measureIndex), 'repeated pitches must map by source timestamp to the note at the same measure position');
+              }
+            }
+          }
+        }
+      }
+    });
+    assert([...score.querySelectorAll('[data-edit-kind="track-name"]')].some(node => node.getAttribute('data-track-id') === 'voice-a' && node.textContent === 'same'), 'first part labels must map to their source track even when the label matches lyric text');
+    assert([...score.querySelectorAll('[data-edit-kind="track-name"]')].some(node => node.getAttribute('data-track-id') === 'voice-b'), 'second part labels must map to their source track');
+    const repeatedLyricTargets = [...score.querySelectorAll('.vf-text.lyrics[data-edit-kind="lyric"]')].filter(node => node.textContent === 'same' && node.getAttribute('data-track-id') === 'voice-a');
+    assert(repeatedLyricTargets.length === measureCount, 'repeated lyric nodes must remain individually discoverable');
+    assert(repeatedLyricTargets.every(node => node.getAttribute('data-edit-kind') === 'lyric' && node.getAttribute('data-track-id') === 'voice-a'), 'a lyric matching a part name must never be retagged as a part label');
+    assert(score.querySelector('svg[viewBox]'), 'OSMD should produce SVG pages with explicit geometry');
+    result.textContent = `PASS: ${targets.length} source-mapped lyrics across ${measureCount} measures and ${sourceTracks.length} parts, native zoom, SVG page geometry`;
+  } catch (error) {
+    result.textContent = `FAIL: ${error?.stack || error}`;
+  }
+</script>
