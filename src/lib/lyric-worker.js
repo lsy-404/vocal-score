@@ -1,9 +1,10 @@
 // One lyric alignment worker for the page. Requests are coalesced: while one alignment runs, only the newest waiting
 // request is kept and older waiting ones resolve to null. Without workers, alignment runs on the page instead.
 
-let worker = null, broken = false, warming = null, running = null, waiting = null, nextId = 0;
+let worker = null, broken = false, warming = null, running = null, waiting = null, nextId = 0, suggesting = null;
 
 const local = () => import('./lyric-alignment.js');
+const localCandidates = request => import('./lyric-candidates.js').then(({findLyricCandidates}) => findLyricCandidates(request.tracks, request.meters));
 
 // Only what alignment reads: track identity and each note's lyric.
 function plainTracks(tracks) {
@@ -17,6 +18,7 @@ function failed(message) {
   broken = true;
   const pending = [running, waiting].filter(Boolean);
   running = waiting = null;
+  if (suggesting) { const request = suggesting; suggesting = null; localCandidates(request).then(request.resolve, request.reject); }
   for (const request of pending) local().then(({alignLyricsToTracks}) => request.resolve(alignLyricsToTracks(request.text, request.tracks, {write: request.write}))).catch(request.reject);
   return new Error(message);
 }
@@ -31,6 +33,13 @@ function start() {
   }
   worker.onmessage = ({data}) => {
     if (data.type === 'ready') { warming?.resolve(true); return; }
+    if (data.type === 'candidates') {
+      if (suggesting?.id !== data.id) return;
+      const request = suggesting;
+      suggesting = null;
+      data.error ? request.reject(new Error(data.error)) : request.resolve(data.result);
+      return;
+    }
     const request = running;
     running = null;
     if (request && data.id === request.id) data.type === 'error' ? request.reject(new Error(data.error)) : request.resolve(data.result);
@@ -67,6 +76,24 @@ export function alignLyrics(text, tracks, {write = 'typed'} = {}) {
     waiting?.resolve(null);
     waiting = {...request, resolve, reject};
     send();
+  });
+}
+
+/**
+ * Characters the song offers for lyrics typed as pinyin (see lyric-candidates.js). Resolves to the list, or null when a
+ * newer request replaced this one.
+ */
+export function suggestLyrics(tracks, meters) {
+  const request = {
+    id: ++nextId,
+    tracks: (tracks ?? []).map(track => ({id: track.id, name: track.name, notes: (track.notes ?? []).map(note => ({onset: note.onset, duration: note.duration, lyrics: String(note.lyrics ?? '')}))})),
+    meters: (meters ?? []).map(meter => ({index: meter.index, numerator: meter.numerator, denominator: meter.denominator})),
+  };
+  if (!start()) return localCandidates(request);
+  return new Promise((resolve, reject) => {
+    suggesting?.resolve(null);
+    suggesting = {...request, resolve, reject};
+    worker.postMessage({type: 'candidates', id: request.id, tracks: request.tracks, meters: request.meters});
   });
 }
 

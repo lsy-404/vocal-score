@@ -7,9 +7,9 @@ import {renderStaffScore} from './lib/staff.js';
 import {analyzeScore,estimateKeys,recommendTranspose} from './lib/analysis.js';
 import {annotateScore,annotateSingers,scoreMetadata,singerPartLabels} from './lib/annotations.js';
 import {decoratePages} from './lib/page-layout.js';
-import {loadDocuments,saveDocument,deleteDocument,upgradeSettings} from './lib/storage.js';
+import {loadDocuments,saveDocument,deleteDocument,upgradeSettings,loadSongs,saveSong,deleteSong} from './lib/storage.js';
 import {createPdf,getPaperDimensions,warmPdfWorker} from './lib/pdf.js';
-import {warmLyricAlignment} from './lib/lyric-worker.js';
+import {warmLyricAlignment,suggestLyrics} from './lib/lyric-worker.js';
 import {collectScoreTextTargets,applyScoreTextEdit,pdfTextRectangle} from './lib/score-text.js';
 import {collectPlaybackMarks,PLAYBACK_MARK_CLASS} from './lib/playback.js';
 import {usePlayback} from './lib/use-playback.js';
@@ -18,6 +18,7 @@ import {translateWarning,translateError,groupWarnings} from './ui-messages.js';
 import FluentCheckbox from './components/FluentCheckbox.vue';
 import LanguagePicker from './components/LanguagePicker.vue';
 import PlaybackBar from './components/PlaybackBar.vue';
+import PlayheadLine from './components/PlayheadLine.vue';
 import ScoreTextOverlay from './components/ScoreTextOverlay.vue';
 import ScoreViewer from './components/ScoreViewer.vue';
 import StartupScreen from './components/StartupScreen.vue';
@@ -29,7 +30,7 @@ const documents=ref([]),activeId=ref(''),ready=ref(false),busy=ref(false),draggi
 const activeSidebar=ref('files'),sidebarCollapsed=ref(false),mobileSidebarOpen=ref(false);
 const sidebarItems=[['files','工程文件'],['settings','谱面设置'],['analysis','乐段与和声分析'],['lyrics','歌词与声部文字'],['tuning','音高微调']];
 const score=ref(null),fileInput=ref(null),rendered=shallowRef(null);
-const previewPages=shallowRef([]),pdfError=ref(''),textTargets=shallowRef([]),exportingPdf=ref(false),playbackMarks=shallowRef([]),viewer=ref(null);
+const previewPages=shallowRef([]),pdfError=ref(''),textTargets=shallowRef([]),exportingPdf=ref(false),playbackMarks=shallowRef([]),viewer=ref(null),songs=shallowRef([]),lyricSuggestions=shallowRef(new Map());
 const error=ref(''),warnings=ref([]),storageState=ref('正在恢复文件…'),storageError=ref(false);
 function preferredTheme(){try{const value=localStorage.getItem('svp-vocal-score.theme');if(value)return value==='dark';}catch{}return matchMedia('(prefers-color-scheme: dark)').matches;}
 const dark=ref(preferredTheme());
@@ -43,7 +44,36 @@ const s=computed(()=>current.value?.settings||emptySettings);
 const stylePreset=computed(()=>Object.entries(STYLE_PRESETS).find(([,values])=>Object.entries(values).every(([key,value])=>s.value[key]===value))?.[0]??'custom');
 function applyStylePreset(name){if(STYLE_PRESETS[name]&&current.value)Object.assign(current.value.settings,STYLE_PRESETS[name]);}
 const result=computed(()=>rendered.value?.result);
-const playback=reactive(usePlayback({document:current,model:computed(()=>result.value?.model),marks:playbackMarks,reveal:spot=>viewer.value?.reveal(spot),translate:t}));
+const playback=reactive(usePlayback({document:current,songs,addSong,model:computed(()=>result.value?.model),marks:playbackMarks,reveal:spot=>viewer.value?.reveal(spot),translate:t}));
+// Songs: audio a synthesizer exported, kept in this browser apart from documents. A document names the song it plays along with.
+const SONG_LIMIT_MB=300,AUDIO_EXTENSIONS=new Set(['wav','mp3','flac','ogg','oga','m4a','aac','opus','webm','aif','aiff']);
+const AUDIO_ACCEPT=`${ACCEPT},${[...AUDIO_EXTENSIONS].map(extension=>`.${extension}`).join(',')},audio/*`;
+const isAudio=file=>!formatsFor(file.name).length&&(AUDIO_EXTENSIONS.has(file.name.split('.').pop()?.toLowerCase())||String(file.type).startsWith('audio/'));
+const fileStem=name=>String(name).replace(/\.[^.]+$/u,'').trim().toLowerCase();
+const songUsers=song=>documents.value.filter(item=>item.settings.songId===song.id).length;
+function songInfo(song){const users=songUsers(song);return `${(song.size/1048576).toFixed(1)} MB · ${users?t('已挂到 {count} 个工程',{count:users}):t('未挂接')}`;}
+async function addSong(file){
+  if(file.size>SONG_LIMIT_MB*1024*1024)throw new Error(t('音频文件超过 {size} MB。',{size:SONG_LIMIT_MB}));
+  const blob=new Blob([file],{type:file.type||'application/octet-stream'}),song={id:crypto.randomUUID(),name:file.name,type:blob.type,size:blob.size,blob,updatedAt:Date.now()};
+  songs.value=[song,...songs.value];
+  try{await saveSong(song);}catch{storageMessage('无法保存音频，刷新后需重新打开。',true);}
+  return song;
+}
+// A new song goes to the project of the same name, or else to the open project, when that has no song yet.
+function attachNewSong(song){
+  const named=documents.value.find(item=>!item.settings.songId&&fileStem(item.name)===fileStem(song.name));
+  const target=named||(current.value&&!current.value.settings.songId?current.value:null);
+  if(!target)return;
+  if(target===current.value){playback.attach(song.id);return;}
+  target.settings.songId=song.id;if(target.settings.piano===undefined)target.settings.piano=false;persist(target);
+}
+function toggleSongAttach(song){if(!current.value)return;if(current.value.settings.songId===song.id)playback.detach();else playback.attach(song.id);}
+async function removeSong(song){
+  try{await deleteSong(song.id);}catch{storageMessage('移除失败，请重试。',true);return;}
+  songs.value=songs.value.filter(item=>item.id!==song.id);
+  for(const item of documents.value)if(item.settings.songId===song.id){item.settings.songId=null;delete item.settings.piano;if(item!==current.value)persist(item);}
+  storageMessage('已移除');
+}
 const analysis=computed(()=>rendered.value?.analysis||{repeats:[],chords:[]});
 const warningGroups=computed(()=>groupWarnings(warnings.value,(current.value?.project.tracks||[]).map(track=>track.name)));
 // A notice shown under its part's heading drops the repeated part name.
@@ -102,7 +132,7 @@ function queueSave(item){
 function scheduleRender(save=true){
   if(save&&current.value)queueSave(current.value);
   const item=current.value;
-  const signature=item?JSON.stringify([item.id,item.project,[...item.selected],[...item.chordChoices],item.transpose,item.fifths,item.title,Object.fromEntries(Object.entries(item.settings).filter(([key])=>!['targetRange','piano','playAudio','audioOffset'].includes(key))),i18n.global.locale.value]):'';
+  const signature=item?JSON.stringify([item.id,item.project,[...item.selected],[...item.chordChoices],item.transpose,item.fifths,item.title,Object.fromEntries(Object.entries(item.settings).filter(([key])=>!['targetRange','piano','playAudio','audioOffset','songId'].includes(key))),i18n.global.locale.value]):'';
   if(signature===requestedSignature)return;
   requestedSignature=signature;revision++;renderController?.abort();downloadPdfCache=null;
   if(rendered.value?.id!==item?.id){rendered.value=null;previewPages.value=[];textTargets.value=[];playbackMarks.value=[];}
@@ -165,7 +195,7 @@ async function renderPending(){
       engravingKey=nextEngravingKey;
       }
       const pages=decoratePages(score.value,layout);
-      textTargets.value=collectScoreTextTargets(pages,item,margin);previewPages.value=pages;
+      textTargets.value=collectScoreTextTargets(pages,item,margin);previewPages.value=pages;refreshSuggestions(item);
       const paper=getPaperDimensions(settings.paperSize,settings.orientation);playbackMarks.value=collectPlaybackMarks(pages,(bounds,svgBounds)=>pdfTextRectangle(bounds,svgBounds,paper,margin));
       rendered.value={id:item.id,result:converted,analysis:found,pages,margin,paper:getPaperDimensions(settings.paperSize,settings.orientation)};warnings.value=[...converted.warnings,...engravingMessages];
     }catch(cause){if(version===revision){engravingKey='';rendered.value=null;previewPages.value=[];textTargets.value=[];playbackMarks.value=[];error.value=readableError(cause);score.value?.replaceChildren();}}
@@ -175,8 +205,11 @@ async function renderPending(){
 
 async function importFiles(files){
   const failures=[];let last;
-  for(const file of files){
+  // Projects first, so a song can find the project of the same name imported with it.
+  const list=[...files].sort((a,b)=>isAudio(a)-isAudio(b));
+  for(const file of list){
     try{
+      if(isAudio(file)){const song=await addSong(file);if(last)activeId.value=last.id;attachNewSong(song);continue;}
       if(!formatsFor(file.name).length)throw new Error(t('不支持此文件类型。'));
       // FL Studio projects carry plugin states and can be large; the other formats are notes and parameters only.
       const limit=formatsFor(file.name).some(format=>format.id==='flp')?512:100;
@@ -239,7 +272,28 @@ async function exportPdf(){
   }catch(cause){if(version===revision)pdfError.value=readableError(cause);}
   finally{exportingPdf.value=false;}
 }
-function editScoreText({target,value}){if(!busy.value&&!exportingPdf.value)applyScoreTextEdit(current.value,target,value);}
+function editScoreText({target,value,also=[]}){
+  if(busy.value||exportingPdf.value)return;
+  if(!applyScoreTextEdit(current.value,target,value))return;
+  // The same pinyin sung at the same time in other parts takes the chosen character too.
+  for(const other of also){const note=current.value.project.tracks.find(track=>String(track.id)===String(other.trackId))?.notes[other.noteIndex];if(note)note.lyrics=value;}
+}
+// Every pinyin lyric in a part that another part sings in characters at the same time takes that character.
+function fillFromOtherParts({trackId}){
+  if(busy.value||exportingPdf.value||!current.value)return;
+  const track=current.value.project.tracks.find(item=>String(item.id)===String(trackId));if(!track)return;
+  for(const entry of lyricSuggestions.value.values())if(String(entry.trackId)===String(trackId)&&entry.candidates[0]?.source.kind==='time'&&track.notes[entry.noteIndex])track.notes[entry.noteIndex].lyrics=entry.candidates[0].text;
+}
+// Characters the song offers for lyrics typed as pinyin, worked out in the lyric worker whenever the lyrics change.
+let suggestionKey='',suggestionDocument='';
+async function refreshSuggestions(item){
+  const key=JSON.stringify([item.id,item.project.meters,item.project.tracks.map(track=>[track.id,track.name,track.notes.map(note=>[note.onset,note.duration,note.lyrics])])]);
+  if(key===suggestionKey)return;
+  suggestionKey=key;
+  if(suggestionDocument!==item.id){suggestionDocument=item.id;lyricSuggestions.value=new Map();}
+  const found=await suggestLyrics(item.project.tracks,item.project.meters).catch(()=>null);
+  if(found&&key===suggestionKey)lyricSuggestions.value=new Map(found.map(entry=>[`${entry.trackId}:${entry.noteIndex}`,entry]));
+}
 function openSidebar(section){activeSidebar.value=section;sidebarCollapsed.value=false;}
 function showNotices(){openSidebar('analysis');if(matchMedia('(max-width:700px)').matches)mobileSidebarOpen.value=true;}
 function preventDrop(event){event.preventDefault();}
@@ -256,7 +310,10 @@ async function prepare(id,label,task){
 }
 // Saved projects are restored and engraved after the start screen, behind the usual progress indicator.
 async function restoreDocuments(){
-  try{const records=await loadDocuments();documents.value=records.map(record=>({...record,settings:{...defaults(),...upgradeSettings(record.settings)},selected:new Set(record.selected),chordChoices:new Map(record.chordChoices)}));activeId.value=documents.value[0]?.id||'';storageMessage(documents.value.length?'已保存在此浏览器':'文件和设置保存在当前浏览器');}
+  try{const records=await loadDocuments();documents.value=records.map(record=>({...record,settings:{...defaults(),...upgradeSettings(record.settings)},selected:new Set(record.selected),chordChoices:new Map(record.chordChoices)}));
+    try{songs.value=await loadSongs();}catch{songs.value=[];}
+    // Audio opened before songs stood on their own was kept under its document's id.
+    for(const item of documents.value)if(item.settings.songId===undefined&&songs.value.some(song=>song.id===item.id))item.settings.songId=item.id;activeId.value=documents.value[0]?.id||'';storageMessage(documents.value.length?'已保存在此浏览器':'文件和设置保存在当前浏览器');}
   catch{storageMessage('无法读取浏览器存储；请检查浏览器的数据权限。',true);}
   ready.value=true;
   if(current.value)scheduleRender(false);
@@ -295,10 +352,14 @@ onBeforeUnmount(()=>{clearTimeout(scheduled);renderController?.abort();window.re
       <label v-show="activeSidebar==='files'&&documents.length" id="dropzone" class="dropzone" :class="{dragover:dragging}" tabindex="0" role="button" for="file-input" @keydown.enter.prevent="fileInput.click()" @keydown.space.prevent="fileInput.click()" @dragover.prevent="dragging=true" @dragleave.prevent="dragging=false" @drop.prevent="drop">
         <svg width="25" height="25" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 16V3m0 0-5 5m5-5 5 5M4 15v5h16v-5" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><strong>{{ t('选择或拖入工程') }}</strong>
       </label>
-      <input id="file-input" ref="fileInput" type="file" :accept="ACCEPT" multiple hidden :disabled="!ready" @change="importFiles($event.target.files)">
+      <input id="file-input" ref="fileInput" type="file" :accept="AUDIO_ACCEPT" multiple hidden :disabled="!ready" @change="importFiles($event.target.files)">
       <section v-show="activeSidebar==='files'" class="setting-section sidebar-panel"><div class="section-label"><h2>{{ t('工程文件') }}</h2><span id="file-count">{{ documents.length }}</span></div>
         <div id="file-list" class="file-list" :aria-label="t('工程文件列表')"><div v-for="item in documents" :key="item.id" class="file-row"><button class="fluent-button fluent-button--subtle file-item" :class="{active:item.id===activeId}" :aria-pressed="item.id===activeId" @click="activeId=item.id"><span class="file-symbol" aria-hidden="true">♬</span><span>{{ item.name }}<small>{{ t('{format} · {count} 个声部',{format:item.project.format||'Synthesizer V Studio',count:item.project.tracks.length}) }}<b v-if="item.project.beta" class="beta-badge">Beta</b></small></span><span class="file-selected">{{ item.id===activeId?'●':'' }}</span></button><button class="fluent-button fluent-button--subtle file-remove" :disabled="removing.has(item.id)" :aria-label="t('移除文件 {name}',{name:item.name})" :title="t('移除文件')" @click="removeDocument(item)">×</button></div></div>
         <p id="storage-status" class="setting-hint" :class="{error:storageError}" role="status" aria-live="polite">{{ t(storageState) }}</p>
+      </section>
+      <section v-show="activeSidebar==='files'&&songs.length" id="song-section" class="setting-section sidebar-panel"><div class="section-label"><h2>{{ t('歌曲') }}</h2><span id="song-count">{{ songs.length }}</span></div>
+        <div id="song-list" class="file-list" :aria-label="t('歌曲列表')"><div v-for="song in songs" :key="song.id" class="file-row song-row"><button class="fluent-button fluent-button--subtle file-item" :class="{active:current?.settings.songId===song.id}" :disabled="!current" :aria-pressed="current?.settings.songId===song.id" :title="t(current?.settings.songId===song.id?'解除挂接':'挂到当前工程')" @click="toggleSongAttach(song)"><span class="file-symbol" aria-hidden="true">♪</span><span>{{ song.name }}<small>{{ songInfo(song) }}</small></span><span class="file-selected">{{ current?.settings.songId===song.id?'●':'' }}</span></button><button class="fluent-button fluent-button--subtle file-remove" :aria-label="t('删除歌曲 {name}',{name:song.name})" :title="t('删除歌曲')" @click="removeSong(song)">×</button></div></div>
+        <p class="setting-hint">{{ t('点击歌曲挂到当前工程，再点一次解除挂接；一首歌曲可挂到多个工程，各自记偏移。') }}</p>
       </section>
       <section v-show="activeSidebar==='files'&&current" class="setting-section sidebar-panel"><div class="section-label"><h2>{{ t('声部') }}</h2><button id="all-tracks" class="fluent-button fluent-button--subtle text-button" :disabled="!current" @click="allTracks">{{ t('全选') }}</button></div><div id="track-list"><div v-for="(track,index) in current?.project.tracks||[]" :key="track.id" class="track-row" :class="{dragging:dragTrack===index,'drop-before':dropTarget===index&&dropAbove&&dragTrack!==index,'drop-after':dropTarget===index&&!dropAbove&&dragTrack!==index}" draggable="true" @dragstart="startTrackDrag(index,$event)" @dragover.prevent="overTrack(index,$event)" @drop.prevent="dropTrack(index)" @dragend="endTrackDrag"><span class="track-handle" :title="t('拖动排序')" aria-hidden="true">⋮⋮</span><FluentCheckbox class="track-item" :model-value="current.selected.has(track.id)" :aria-label="track.name" @update:model-value="selectTrack(track.id,$event)"/><input class="track-name-input" :value="track.name" :aria-label="t('声部名称')" maxlength="160" autocomplete="off" draggable="false" @dragstart.stop.prevent @change="renameTrack(track,$event.target.value)" @keydown.enter="$event.target.blur()"><small :title="track.singer||undefined"><template v-if="track.singer">{{ track.singer }} · </template>{{ t('{count} 音符',{count:track.notes.length}) }}</small><span class="track-move"><button class="fluent-button fluent-button--subtle" type="button" :disabled="index===0" :aria-label="t('上移')" @click="moveTrack(index,index-1)">↑</button><button class="fluent-button fluent-button--subtle" type="button" :disabled="index===current.project.tracks.length-1" :aria-label="t('下移')" @click="moveTrack(index,index+1)">↓</button></span></div></div></section>
       <section v-show="activeSidebar==='settings'" class="setting-section settings sidebar-panel"><h2>{{ t('谱面设置') }}</h2>
@@ -336,7 +397,7 @@ onBeforeUnmount(()=>{clearTimeout(scheduled);renderController?.abort();window.re
       <div v-if="error||pdfError" id="message" class="fluent-notice error fluent-notice--danger" role="status" aria-live="polite">{{ error||pdfError }}</div>
       <div class="score-stage">
         <label v-if="!current" for="file-input" class="empty-score" :class="{dragover:dragging}" tabindex="0" role="button" @keydown.enter.prevent="fileInput.click()" @keydown.space.prevent="fileInput.click()" @dragover.prevent="dragging=true" @dragleave.prevent="dragging=false" @drop.prevent="drop"><img :src="logoUrl" alt="" width="64" height="64"><strong>{{ t('选择或拖入工程') }}</strong><span class="format-list">{{ formatList }}</span><span>{{ t('文件仅在本机处理') }}</span></label>
-        <ScoreViewer v-else ref="viewer" :pages="previewPages" :paper="rendered?.paper||paperDimensions" :margin="rendered?.margin??10" @pick="playback.seekToPoint"><template #toolbar-start><div class="view-switch" role="group" :aria-label="t('记谱方式')"><button v-for="mode in ['staff','jianpu']" :id="`${mode}-view`" :key="mode" class="fluent-button" :aria-pressed="s.view===mode" @click="s.view=mode">{{ t(mode==='staff'?'五线谱':'简谱') }}</button></div><span v-if="busy" id="busy" class="busy" role="status"><span class="spinner"/><span class="busy-label">{{ t('正在排版乐谱…') }}</span></span></template><template #page-overlay="{pageNumber}"><ScoreTextOverlay :targets="textTargets" :page-number="pageNumber" :disabled="busy||exportingPdf" @commit="editScoreText"/><div v-if="playback.playhead?.pageNumber===pageNumber" class="playhead" aria-hidden="true" :style="{left:`${playback.playhead.x*100}%`,top:`${playback.playhead.y*100}%`,height:`${playback.playhead.height*100}%`,pointerEvents:'none'}"/></template><template #footer><PlaybackBar :playback="playback" :disabled="!result"/></template></ScoreViewer>
+        <ScoreViewer v-else ref="viewer" :pages="previewPages" :paper="rendered?.paper||paperDimensions" :margin="rendered?.margin??10" @pick="playback.seekToPoint"><template #toolbar-start><div class="view-switch" role="group" :aria-label="t('记谱方式')"><button v-for="mode in ['staff','jianpu']" :id="`${mode}-view`" :key="mode" class="fluent-button" :aria-pressed="s.view===mode" @click="s.view=mode">{{ t(mode==='staff'?'五线谱':'简谱') }}</button></div><span v-if="busy" id="busy" class="busy" role="status"><span class="spinner"/><span class="busy-label">{{ t('正在排版乐谱…') }}</span></span></template><template #page-overlay="{pageNumber,pageWidth,pageHeight}"><ScoreTextOverlay :targets="textTargets" :page-number="pageNumber" :disabled="busy||exportingPdf" :suggestions="lyricSuggestions" @commit="editScoreText" @fill="fillFromOtherParts"/><PlayheadLine :playback="playback" :page-number="pageNumber" :width="pageWidth" :height="pageHeight"/></template><template #footer><PlaybackBar :playback="playback" :disabled="!result"/></template></ScoreViewer>
       </div>
       <div id="score" ref="score" class="score-source" :style="{width:`${paperDimensions.width*3.78}px`}" aria-hidden="true"/>
     </main>

@@ -75,7 +75,21 @@ export function createScorePlayer({onEnd} = {}) {
   }
 
   const duration = () => Math.max(map.duration, audio ? audioOffset + audio.duration : 0);
-  const position = () => playing ? Math.min(duration(), Math.max(origin, origin + context.currentTime - startedAt)) : resting;
+  // The context time being heard now. currentTime moves in steps of the audio thread's buffer (often 10 ms or more),
+  // which made the playhead stutter; the output timestamp plus the page clock moves every frame and allows for the
+  // output latency, so the playhead matches what is heard.
+  function heard() {
+    const stamp = context.getOutputTimestamp?.();
+    if (stamp?.contextTime > 0 && stamp.performanceTime > 0) return stamp.contextTime + (performance.now() - stamp.performanceTime) / 1000;
+    return context.currentTime;
+  }
+  let lastShown = 0;
+  function position() {
+    if (!playing) return resting;
+    // Never step back when a new timestamp lands slightly behind the last estimate.
+    lastShown = Math.min(duration(), Math.max(lastShown, origin + heard() - startedAt));
+    return Math.max(origin, lastShown);
+  }
 
   async function prepareTones() {
     const missing = [...new Set(notes.map(note => note.pitch))].filter(pitch => !tones.has(pitch));
@@ -123,6 +137,7 @@ export function createScorePlayer({onEnd} = {}) {
 
   function pump() {
     if (!playing) return;
+    // Scheduling runs on the audio thread's own clock, ahead of what is heard.
     const horizon = origin + context.currentTime - startedAt + LOOKAHEAD;
     while (nextNote < notes.length && notes[nextNote].start < horizon) scheduleNote(notes[nextNote++]);
     if (position() >= duration()) finish();
@@ -159,6 +174,7 @@ export function createScorePlayer({onEnd} = {}) {
     if (origin >= duration() - 0.01) origin = 0;
     startedAt = ctx.currentTime + LEAD;
     nextNote = firstNoteFrom(notes, origin);
+    lastShown = origin;
     playing = true;
     startAudio();
     pump();

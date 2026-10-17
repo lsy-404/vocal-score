@@ -118,7 +118,7 @@ onBeforeUnmount(()=>{cancelAnimationFrame(resizeFrame);cancelAnimationFrame(scro
       <div class="score-viewer__pages">
         <article v-for="(page,index) in pages" :key="index" :ref="element=>bindPage(element,index)" class="score-viewer__page" @click="pick(index,$event)" :data-page-number="index+1" :style="{width:`${layout.width}px`,height:`${layout.height}px`}" :aria-label="t('第 {page} 页，共 {total} 页',{page:index+1,total:totalPages})">
           <div class="score-viewer__sheet" :style="sheetStyle"/>
-          <div class="score-viewer__page-overlay"><slot name="page-overlay" :page-number="index+1"/></div>
+          <div class="score-viewer__page-overlay"><slot name="page-overlay" :page-number="index+1" :page-width="layout.width" :page-height="layout.height"/></div>
         </article>
       </div>
     </div>

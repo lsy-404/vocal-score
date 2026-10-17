@@ -104,28 +104,84 @@ function barPoints(start, end, points) {
   return path;
 }
 
-function markAt(marks, tick) {
-  let low = 0, high = marks.length - 1;
-  if (high < 0) return null;
+// The last item whose key is at or before the value (items sorted by key).
+function lastAtOrBefore(items, value, key) {
+  let low = 0, high = items.length - 1;
+  if (high < 0) return -1;
   while (low < high) {
     const middle = (low + high + 1) >>> 1;
-    if (marks[middle].start <= tick) low = middle;
+    if (key(items[middle]) <= value) low = middle;
     else high = middle - 1;
   }
-  return marks[low];
+  return low;
 }
 
-/** Where the playhead stands at a tick: the page, x as a page fraction and the bar's top and height. */
-export function playheadAt(marks, tick) {
-  const mark = markAt(marks, Math.max(0, tick));
-  if (!mark) return null;
-  const clamped = Math.min(mark.end, Math.max(mark.start, tick));
-  const points = mark.points;
-  let index = 0;
-  while (index < points.length - 2 && points[index + 1][0] <= clamped) index += 1;
+// Tangents for a monotone cubic through the points (Fritsch–Carlson): the playhead's speed changes smoothly from one
+// note to the next instead of jumping at every onset, and it never runs backwards or past a note.
+function monotoneTangents(points) {
+  const slopes = points.slice(1).map((point, index) => {
+    const span = point[0] - points[index][0];
+    return span > 0 ? (point[1] - points[index][1]) / span : 0;
+  });
+  const last = points.length - 1;
+  const tangents = points.map((_, index) => {
+    if (index === 0) return slopes[0] ?? 0;
+    if (index === last) return slopes[last - 1] ?? 0;
+    return slopes[index - 1] * slopes[index] <= 0 ? 0 : (slopes[index - 1] + slopes[index]) / 2;
+  });
+  slopes.forEach((slope, index) => {
+    if (slope === 0) { tangents[index] = tangents[index + 1] = 0; return; }
+    const a = tangents[index] / slope, b = tangents[index + 1] / slope, size = a * a + b * b;
+    if (size > 9) {
+      const scale = 3 / Math.sqrt(size);
+      tangents[index] = scale * a * slope;
+      tangents[index + 1] = scale * b * slope;
+    }
+  });
+  return tangents;
+}
+
+/**
+ * Rows of bars (one per system) with the playhead's path across each, in page fractions. Within a row the path runs
+ * from the last note of one bar straight on to the first note of the next, so it does not stop at barlines.
+ */
+export function playbackRows(marks) {
+  const rows = [];
+  for (const mark of marks) {
+    const points = mark.points.map(([tick, fraction]) => [tick, mark.x + fraction * mark.width]);
+    const row = rows.at(-1);
+    if (row && row.pageNumber === mark.pageNumber && Math.abs(row.y - mark.y) < 0.002 && mark.start >= row.end - 1e-6) {
+      row.points.pop();
+      for (const point of points) {
+        const previous = row.points.at(-1);
+        if (point[0] > previous[0] && point[1] >= previous[1]) row.points.push(point);
+      }
+      row.end = mark.end;
+      row.height = Math.max(row.height, mark.height);
+    } else {
+      rows.push({pageNumber: mark.pageNumber, y: mark.y, height: mark.height, start: mark.start, end: mark.end, points});
+    }
+  }
+  for (const row of rows) row.tangents = monotoneTangents(row.points);
+  return rows;
+}
+
+/** Where the playhead stands at a tick: the page, x as a page fraction and the row's top and height. */
+export function playheadAt(rows, tick) {
+  const rowIndex = lastAtOrBefore(rows, Math.max(0, tick), row => row.start);
+  if (rowIndex < 0) return null;
+  const row = rows[rowIndex], points = row.points;
+  const at = Math.min(row.end, Math.max(row.start, tick));
+  const index = Math.min(points.length - 2, Math.max(0, lastAtOrBefore(points, at, point => point[0])));
   const [t0, x0] = points[index], [t1, x1] = points[index + 1] ?? points[index];
-  const fraction = t1 > t0 ? (clamped - t0) / (t1 - t0) : 0;
-  return {pageNumber: mark.pageNumber, x: mark.x + (x0 + (x1 - x0) * fraction) * mark.width, y: mark.y, height: mark.height, start: mark.start};
+  const span = t1 - t0;
+  let x = x0;
+  if (span > 0) {
+    // Cubic Hermite between the two notes.
+    const s = Math.min(1, Math.max(0, (at - t0) / span)), s2 = s * s, s3 = s2 * s;
+    x = (2 * s3 - 3 * s2 + 1) * x0 + (s3 - 2 * s2 + s) * span * row.tangents[index] + (3 * s2 - 2 * s3) * x1 + (s3 - s2) * span * row.tangents[index + 1];
+  }
+  return {pageNumber: row.pageNumber, x, y: row.y, height: row.height, start: row.start};
 }
 
 /** The tick under a point on a page (page fractions), or null when no bar is near it. */
