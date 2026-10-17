@@ -4,6 +4,7 @@ import {t} from '../i18n.js';
 
 // Pages are shown as the engraved SVGs, placed on paper with the same margin and fit as the downloaded PDF.
 const props=defineProps({pages:{type:Array,default:()=>[]},paper:{type:Object,required:true},margin:{type:Number,default:10}});
+const emit=defineEmits(['pick']);
 const viewportElement=ref(null),pageElements=[];
 const pageNumber=ref(1),pageInput=ref(1),zoom=ref('width'),layout=ref({width:1,height:1});
 const PAGE_GAP=10,PX_PER_MM=96/25.4,MAX_FIT_WIDTH=1400;
@@ -51,6 +52,23 @@ function updatePageWindow(){
 }
 
 function bindPage(element,index){pageElements[index]=element||undefined;}
+// A click on the paper, outside the editable text, as page fractions (the playhead moves there).
+function pick(index,event){
+  if(event.target.closest?.('button,input,select,textarea,a,form,label'))return;
+  const bounds=event.currentTarget.getBoundingClientRect();
+  if(bounds.width>0&&bounds.height>0)emit('pick',{pageNumber:index+1,x:(event.clientX-bounds.left)/bounds.width,y:(event.clientY-bounds.top)/bounds.height});
+}
+// Scrolls a spot on a page (page fractions) into view when it is outside, keeping some of what follows visible.
+function reveal({pageNumber:number,x,y,height}){
+  const viewport=viewportElement.value,page=pageElements[number-1];if(!viewport||!page)return;
+  const view=viewport.getBoundingClientRect(),bounds=page.getBoundingClientRect();
+  const top=bounds.top-view.top+viewport.scrollTop+y*bounds.height,bottom=top+height*bounds.height,left=bounds.left-view.left+viewport.scrollLeft+x*bounds.width;
+  const next={};
+  if(top<viewport.scrollTop+8||bottom>viewport.scrollTop+viewport.clientHeight-8)next.top=Math.max(0,top-Math.min(viewport.clientHeight*0.2,80));
+  if(left<viewport.scrollLeft+8||left>viewport.scrollLeft+viewport.clientWidth-8)next.left=Math.max(0,left-viewport.clientWidth/3);
+  if(Object.keys(next).length)viewport.scrollTo({...next,behavior:'smooth'});
+}
+defineExpose({reveal});
 function navigateToPage(){
   const requested=Math.min(totalPages.value,Math.max(1,Math.trunc(Number(pageInput.value)||1)));
   pageInput.value=requested;setCurrentPage(requested);
@@ -98,12 +116,13 @@ onBeforeUnmount(()=>{cancelAnimationFrame(resizeFrame);cancelAnimationFrame(scro
     </header>
     <div ref="viewportElement" class="score-viewer__viewport">
       <div class="score-viewer__pages">
-        <article v-for="(page,index) in pages" :key="index" :ref="element=>bindPage(element,index)" class="score-viewer__page" :data-page-number="index+1" :style="{width:`${layout.width}px`,height:`${layout.height}px`}" :aria-label="t('第 {page} 页，共 {total} 页',{page:index+1,total:totalPages})">
+        <article v-for="(page,index) in pages" :key="index" :ref="element=>bindPage(element,index)" class="score-viewer__page" @click="pick(index,$event)" :data-page-number="index+1" :style="{width:`${layout.width}px`,height:`${layout.height}px`}" :aria-label="t('第 {page} 页，共 {total} 页',{page:index+1,total:totalPages})">
           <div class="score-viewer__sheet" :style="sheetStyle"/>
           <div class="score-viewer__page-overlay"><slot name="page-overlay" :page-number="index+1"/></div>
         </article>
       </div>
     </div>
+    <slot name="footer"/>
   </section>
 </template>
 

@@ -1,4 +1,5 @@
 import { getPaperDimensions } from './pdf.js';
+import { addPlaybackMark } from './playback.js';
 
 function setTarget(node, note) {
   if (!node || !note) return;
@@ -94,6 +95,32 @@ function tagPartNames(osmd, model, partLabels) {
   }
 }
 
+// The x where a staff entry's note head (or rest) sits, in the page's SVG units.
+function entryX(entry) {
+  const note = entry.graphicalVoiceEntries?.find(voice => voice.vfStaveNote)?.vfStaveNote;
+  if (!note) return NaN;
+  const begin = note.getNoteHeadBeginX?.(), end = note.getNoteHeadEndX?.();
+  return Number.isFinite(begin) && Number.isFinite(end) && end > begin ? (begin + end) / 2 : note.getAbsoluteX() + 5;
+}
+
+// One playback mark per bar: across the whole system, from the top line of its first staff to the bottom line of its
+// last, with where each onset's notes sit.
+function markBars(osmd, container, divisions) {
+  const pages = Array.from(container.querySelectorAll('svg')).filter(svg => !svg.parentElement?.closest('svg'));
+  const musicPages = osmd.graphic?.MusicPages ?? [];
+  for (const staves of osmd.graphic?.measureList ?? []) {
+    const measures = (staves ?? []).filter(measure => measure?.getVFStave?.());
+    if (!measures.length) continue;
+    const first = measures[0].getVFStave(), last = measures.at(-1).getVFStave();
+    const source = measures[0].parentSourceMeasure;
+    const svg = pages[musicPages.indexOf(measures[0].ParentMusicSystem?.Parent)];
+    if (!svg || !source) continue;
+    const start = source.AbsoluteTimestamp.RealValue * 4 * divisions;
+    const points = measures.flatMap(measure => (measure.staffEntries ?? []).map(entry => [entry.getAbsoluteTimestamp().RealValue * 4 * divisions, entryX(entry)]));
+    addPlaybackMark(svg, {start, end: start + source.Duration.RealValue * 4 * divisions, left: first.getX(), right: first.getX() + first.getWidth(), top: first.getYForLine(0), bottom: last.getYForLine(4), points});
+  }
+}
+
 // OSMD reserves a lyric row only in systems that show lyric text, so a melisma carried into a new system had its
 // extender drawn through the notes or into the staff below. Systems break only at barlines: an invisible syllable on a
 // bar's first note, when that note only continues a melisma, keeps the row. Only the engraved copy changes.
@@ -151,5 +178,6 @@ export async function renderStaffScore(container, xml, {
   osmd.render();
   tagLyricTargets(osmd, model);
   tagPartNames(osmd, model, partLabels);
+  if (model?.divisions) markBars(osmd, container, model.divisions);
   return { osmd };
 }

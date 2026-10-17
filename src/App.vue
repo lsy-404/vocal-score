@@ -1,5 +1,5 @@
 <script setup>
-import {computed,ref,shallowRef,watch,nextTick,onMounted,onBeforeUnmount,toRaw,defineAsyncComponent} from 'vue';
+import {computed,reactive,ref,shallowRef,watch,nextTick,onMounted,onBeforeUnmount,toRaw,defineAsyncComponent} from 'vue';
 import {createScore} from './lib/converter.js';
 import {ACCEPT,FORMATS,formatsFor,importProject} from './lib/importers/index.js';
 import {renderJianpu} from './lib/jianpu.js';
@@ -10,11 +10,14 @@ import {decoratePages} from './lib/page-layout.js';
 import {loadDocuments,saveDocument,deleteDocument,upgradeSettings} from './lib/storage.js';
 import {createPdf,getPaperDimensions,warmPdfWorker} from './lib/pdf.js';
 import {warmLyricAlignment} from './lib/lyric-worker.js';
-import {collectScoreTextTargets,applyScoreTextEdit} from './lib/score-text.js';
+import {collectScoreTextTargets,applyScoreTextEdit,pdfTextRectangle} from './lib/score-text.js';
+import {collectPlaybackMarks,PLAYBACK_MARK_CLASS} from './lib/playback.js';
+import {usePlayback} from './lib/use-playback.js';
 import {t,i18n} from './i18n.js';
 import {translateWarning,translateError,groupWarnings} from './ui-messages.js';
 import FluentCheckbox from './components/FluentCheckbox.vue';
 import LanguagePicker from './components/LanguagePicker.vue';
+import PlaybackBar from './components/PlaybackBar.vue';
 import ScoreTextOverlay from './components/ScoreTextOverlay.vue';
 import ScoreViewer from './components/ScoreViewer.vue';
 import StartupScreen from './components/StartupScreen.vue';
@@ -26,7 +29,7 @@ const documents=ref([]),activeId=ref(''),ready=ref(false),busy=ref(false),draggi
 const activeSidebar=ref('files'),sidebarCollapsed=ref(false),mobileSidebarOpen=ref(false);
 const sidebarItems=[['files','工程文件'],['settings','谱面设置'],['analysis','乐段与和声分析'],['lyrics','歌词与声部文字'],['tuning','音高微调']];
 const score=ref(null),fileInput=ref(null),rendered=shallowRef(null);
-const previewPages=shallowRef([]),pdfError=ref(''),textTargets=shallowRef([]),exportingPdf=ref(false);
+const previewPages=shallowRef([]),pdfError=ref(''),textTargets=shallowRef([]),exportingPdf=ref(false),playbackMarks=shallowRef([]),viewer=ref(null);
 const error=ref(''),warnings=ref([]),storageState=ref('正在恢复文件…'),storageError=ref(false);
 function preferredTheme(){try{const value=localStorage.getItem('svp-vocal-score.theme');if(value)return value==='dark';}catch{}return matchMedia('(prefers-color-scheme: dark)').matches;}
 const dark=ref(preferredTheme());
@@ -40,6 +43,7 @@ const s=computed(()=>current.value?.settings||emptySettings);
 const stylePreset=computed(()=>Object.entries(STYLE_PRESETS).find(([,values])=>Object.entries(values).every(([key,value])=>s.value[key]===value))?.[0]??'custom');
 function applyStylePreset(name){if(STYLE_PRESETS[name]&&current.value)Object.assign(current.value.settings,STYLE_PRESETS[name]);}
 const result=computed(()=>rendered.value?.result);
+const playback=reactive(usePlayback({document:current,model:computed(()=>result.value?.model),marks:playbackMarks,reveal:spot=>viewer.value?.reveal(spot),translate:t}));
 const analysis=computed(()=>rendered.value?.analysis||{repeats:[],chords:[]});
 const warningGroups=computed(()=>groupWarnings(warnings.value,(current.value?.project.tracks||[]).map(track=>track.name)));
 // A notice shown under its part's heading drops the repeated part name.
@@ -98,10 +102,10 @@ function queueSave(item){
 function scheduleRender(save=true){
   if(save&&current.value)queueSave(current.value);
   const item=current.value;
-  const signature=item?JSON.stringify([item.id,item.project,[...item.selected],[...item.chordChoices],item.transpose,item.fifths,item.title,Object.fromEntries(Object.entries(item.settings).filter(([key])=>key!=='targetRange')),i18n.global.locale.value]):'';
+  const signature=item?JSON.stringify([item.id,item.project,[...item.selected],[...item.chordChoices],item.transpose,item.fifths,item.title,Object.fromEntries(Object.entries(item.settings).filter(([key])=>!['targetRange','piano','playAudio','audioOffset'].includes(key))),i18n.global.locale.value]):'';
   if(signature===requestedSignature)return;
   requestedSignature=signature;revision++;renderController?.abort();downloadPdfCache=null;
-  if(rendered.value?.id!==item?.id){rendered.value=null;previewPages.value=[];textTargets.value=[];}
+  if(rendered.value?.id!==item?.id){rendered.value=null;previewPages.value=[];textTargets.value=[];playbackMarks.value=[];}
   pdfError.value='';error.value='';warnings.value=[];clearTimeout(scheduled);
   if(!current.value){pending=false;busy.value=false;engravingKey='';score.value?.replaceChildren();return;}
   busy.value=true;
@@ -162,8 +166,9 @@ async function renderPending(){
       }
       const pages=decoratePages(score.value,layout);
       textTargets.value=collectScoreTextTargets(pages,item,margin);previewPages.value=pages;
+      const paper=getPaperDimensions(settings.paperSize,settings.orientation);playbackMarks.value=collectPlaybackMarks(pages,(bounds,svgBounds)=>pdfTextRectangle(bounds,svgBounds,paper,margin));
       rendered.value={id:item.id,result:converted,analysis:found,pages,margin,paper:getPaperDimensions(settings.paperSize,settings.orientation)};warnings.value=[...converted.warnings,...engravingMessages];
-    }catch(cause){if(version===revision){engravingKey='';rendered.value=null;previewPages.value=[];textTargets.value=[];error.value=readableError(cause);score.value?.replaceChildren();}}
+    }catch(cause){if(version===revision){engravingKey='';rendered.value=null;previewPages.value=[];textTargets.value=[];playbackMarks.value=[];error.value=readableError(cause);score.value?.replaceChildren();}}
   }
   running=false;busy.value=false;
 }
@@ -221,7 +226,7 @@ function download(data,suffix,mime){const name=(current.value?.title||t('织音�
 function exportXml(){if(canExport.value)download(result.value.xml,'.musicxml','application/vnd.recordare.musicxml+xml;charset=utf-8');}
 function exportSvg(){
   if(!canExport.value)return;const pages=[...score.value.querySelectorAll('svg')].filter(svg=>!svg.parentElement.closest('svg')),combined=document.createElementNS('http://www.w3.org/2000/svg','svg');combined.setAttribute('xmlns','http://www.w3.org/2000/svg');let height=0,width=0;
-  for(const source of pages){const bounds=source.viewBox.baseVal,w=bounds.width,h=bounds.height,copy=source.cloneNode(true);copy.setAttribute('x','0');copy.setAttribute('y',String(height));copy.setAttribute('width',String(w));copy.setAttribute('height',String(h));combined.append(copy);width=Math.max(width,w);height+=h;}
+  for(const source of pages){const bounds=source.viewBox.baseVal,w=bounds.width,h=bounds.height,copy=source.cloneNode(true);copy.querySelectorAll(`.${PLAYBACK_MARK_CLASS}`).forEach(node=>node.remove());copy.setAttribute('x','0');copy.setAttribute('y',String(height));copy.setAttribute('width',String(w));copy.setAttribute('height',String(h));combined.append(copy);width=Math.max(width,w);height+=h;}
   combined.setAttribute('viewBox',`0 0 ${width} ${height}`);combined.setAttribute('width',String(width));combined.setAttribute('height',String(height));combined.setAttribute('style','background:white');download(new XMLSerializer().serializeToString(combined),s.value.view==='staff'?'_staff.svg':'_jianpu.svg','image/svg+xml;charset=utf-8');
 }
 async function exportPdf(){
@@ -331,7 +336,7 @@ onBeforeUnmount(()=>{clearTimeout(scheduled);renderController?.abort();window.re
       <div v-if="error||pdfError" id="message" class="fluent-notice error fluent-notice--danger" role="status" aria-live="polite">{{ error||pdfError }}</div>
       <div class="score-stage">
         <label v-if="!current" for="file-input" class="empty-score" :class="{dragover:dragging}" tabindex="0" role="button" @keydown.enter.prevent="fileInput.click()" @keydown.space.prevent="fileInput.click()" @dragover.prevent="dragging=true" @dragleave.prevent="dragging=false" @drop.prevent="drop"><img :src="logoUrl" alt="" width="64" height="64"><strong>{{ t('选择或拖入工程') }}</strong><span class="format-list">{{ formatList }}</span><span>{{ t('文件仅在本机处理') }}</span></label>
-        <ScoreViewer v-else :pages="previewPages" :paper="rendered?.paper||paperDimensions" :margin="rendered?.margin??10"><template #toolbar-start><div class="view-switch" role="group" :aria-label="t('记谱方式')"><button v-for="mode in ['staff','jianpu']" :id="`${mode}-view`" :key="mode" class="fluent-button" :aria-pressed="s.view===mode" @click="s.view=mode">{{ t(mode==='staff'?'五线谱':'简谱') }}</button></div><span v-if="busy" id="busy" class="busy" role="status"><span class="spinner"/><span class="busy-label">{{ t('正在排版乐谱…') }}</span></span></template><template #page-overlay="{pageNumber}"><ScoreTextOverlay :targets="textTargets" :page-number="pageNumber" :disabled="busy||exportingPdf" @commit="editScoreText"/></template></ScoreViewer>
+        <ScoreViewer v-else ref="viewer" :pages="previewPages" :paper="rendered?.paper||paperDimensions" :margin="rendered?.margin??10" @pick="playback.seekToPoint"><template #toolbar-start><div class="view-switch" role="group" :aria-label="t('记谱方式')"><button v-for="mode in ['staff','jianpu']" :id="`${mode}-view`" :key="mode" class="fluent-button" :aria-pressed="s.view===mode" @click="s.view=mode">{{ t(mode==='staff'?'五线谱':'简谱') }}</button></div><span v-if="busy" id="busy" class="busy" role="status"><span class="spinner"/><span class="busy-label">{{ t('正在排版乐谱…') }}</span></span></template><template #page-overlay="{pageNumber}"><ScoreTextOverlay :targets="textTargets" :page-number="pageNumber" :disabled="busy||exportingPdf" @commit="editScoreText"/><div v-if="playback.playhead?.pageNumber===pageNumber" class="playhead" aria-hidden="true" :style="{left:`${playback.playhead.x*100}%`,top:`${playback.playhead.y*100}%`,height:`${playback.playhead.height*100}%`,pointerEvents:'none'}"/></template><template #footer><PlaybackBar :playback="playback" :disabled="!result"/></template></ScoreViewer>
       </div>
       <div id="score" ref="score" class="score-source" :style="{width:`${paperDimensions.width*3.78}px`}" aria-hidden="true"/>
     </main>

@@ -1,6 +1,8 @@
 const DATABASE_NAME = 'svp-vocal-score';
 const STORE_NAME = 'documents';
-const DATABASE_VERSION = 1;
+// Audio opened to play along with a score, one per document, kept apart so saving a document never rewrites it.
+const AUDIO_STORE = 'audio';
+const DATABASE_VERSION = 2;
 
 function describe(error) {
   return error?.message || String(error || 'unknown error');
@@ -19,6 +21,7 @@ function openDatabase() {
     request.onupgradeneeded = () => {
       const database = request.result;
       if (!database.objectStoreNames.contains(STORE_NAME)) database.createObjectStore(STORE_NAME, {keyPath: 'id'});
+      if (!database.objectStoreNames.contains(AUDIO_STORE)) database.createObjectStore(AUDIO_STORE, {keyPath: 'id'});
     };
     request.onerror = () => fail(`Could not open local document storage: ${describe(request.error)}.`);
     request.onblocked = () => fail('Could not open local document storage because another tab is blocking the database upgrade. Close the other tab and retry.');
@@ -33,7 +36,7 @@ function openDatabase() {
   });
 }
 
-function transact(mode, action) {
+function transact(mode, action, stores = [STORE_NAME]) {
   return openDatabase().then(database => new Promise((resolve, reject) => {
     let settled = false;
     let actionError = null;
@@ -46,9 +49,9 @@ function transact(mode, action) {
       reject(new Error(message));
     };
     try {
-      transaction = database.transaction(STORE_NAME, mode);
-      const store = transaction.objectStore(STORE_NAME);
-      action(store, value => { readResult = value; });
+      transaction = database.transaction(stores, mode);
+      const store = transaction.objectStore(stores[0]);
+      action(store, value => { readResult = value; }, transaction);
     } catch (error) {
       database.close();
       reject(new Error(`Could not start local document storage transaction: ${describe(error)}.`));
@@ -115,5 +118,26 @@ export function saveDocument(record) {
 
 export function deleteDocument(id) {
   if (typeof id !== 'string' || !id) return Promise.reject(new TypeError('A document id must be a nonempty string.'));
-  return transact('readwrite', store => { store.delete(id); });
+  return transact('readwrite', (store, setResult, transaction) => {
+    store.delete(id);
+    transaction.objectStore(AUDIO_STORE).delete(id);
+  }, [STORE_NAME, AUDIO_STORE]);
+}
+
+/** Keeps a document's play-along audio: {name, type, blob}. */
+export function saveAudio(id, {name, blob}) {
+  if (typeof id !== 'string' || !id || !(blob instanceof Blob)) return Promise.reject(new TypeError('Audio needs a document id and a Blob.'));
+  return transact('readwrite', store => { store.put({id, name: String(name || ''), type: blob.type, blob, updatedAt: Date.now()}); }, [AUDIO_STORE]);
+}
+
+/** The document's play-along audio, or null. */
+export function loadAudio(id) {
+  return transact('readonly', (store, setResult) => {
+    const request = store.get(id);
+    request.onsuccess = () => setResult(request.result ?? null);
+  }, [AUDIO_STORE]);
+}
+
+export function deleteAudio(id) {
+  return transact('readwrite', store => { store.delete(id); }, [AUDIO_STORE]);
 }

@@ -1,3 +1,5 @@
+import { addPlaybackMark } from "./playback.js";
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 const DEGREE = ["1", "2", "3", "4", "5", "6", "7"];
 const NATURAL_PC = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
@@ -428,6 +430,7 @@ export async function renderJianpu(xml, container, {
   const pageCount = Math.max(1, Math.ceil(systems.length / systemsPerPage));
   const svgs = [];
   const eventPositions = new Map();
+  const measureIndexes = new Map(measures.map((measure, index) => [measure, index]));
   const styleText = `.jianpu-note{font-size:24px;fill:#111}.jianpu-lyric{font-size:${safeLyricFontSize}px;fill:#333}.jianpu-rhythm,.jianpu-tie{stroke:#111;stroke-width:1.5;fill:none}.jianpu-tuplet,.jianpu-slide{stroke:#111;stroke-width:1;fill:none}.jianpu-grace{font-size:12px;fill:#111}.jianpu-tuplet-number{font-size:11px;font-style:italic;fill:#111}.jianpu-sustain{font-size:20px;fill:#111}.jianpu-dot,.jianpu-octave-dot{fill:#111}.jianpu-bar{stroke:#888;stroke-width:1}.jianpu-final-bar{fill:#333}.jianpu-label{font-size:14px;fill:#222}.jianpu-system-change{font-size:12px;fill:#444}.jianpu-annotation{fill:#4b5563}.jianpu-measure{font-size:12px;fill:#777}.jianpu-page{display:block;max-width:100%;height:auto;margin:0 auto 18px}@media print{@page{size:A4 portrait;margin:10mm}.jianpu-page{width:190mm;height:auto;max-width:none;margin:0;break-after:page;page-break-after:always}.jianpu-page:last-of-type{break-after:auto;page-break-after:auto}}`;
   for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
     const pageSystems = systems.slice(pageIndex * systemsPerPage, (pageIndex + 1) * systemsPerPage);
@@ -485,6 +488,12 @@ export async function renderJianpu(xml, container, {
           }
           drawBeamedLines(svg, drawn, y);
           drawTuplets(svg, drawn, y);
+        }
+        // The bar's playback mark, across all parts, with each onset where its number is drawn.
+        const bar = model?.measures?.[measureIndexes.get(measure)];
+        if (bar && model.divisions) {
+          const points = measure.lines.flatMap((line) => line.events.filter((event) => !event.chord).map((event) => [bar.start + event.x * model.divisions, eventPositions.get(event)?.x]));
+          addPlaybackMark(svg, { start: bar.start, end: bar.end, left: x0, right: x0 + widthHere, top: yTop + 22, bottom: yBottom, points });
         }
       }
     });
