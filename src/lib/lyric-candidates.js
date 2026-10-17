@@ -133,10 +133,12 @@ function barCounter(meters) {
 
 /**
  * Candidates for every pinyin lyric that the song can supply a character for.
- * @returns {Array<{trackId, noteIndex, reading, candidates: Array<{text, source}>, homophones: string[], together: Array<{trackId, noteIndex}>}>}
+ * @returns {Array<{trackId, noteIndex, reading, bar, before, after, candidates: Array<{text, source, confident}>, homophones: string[], together: Array<{trackId, noteIndex}>}>}
  *   source is {kind: 'time', trackName} for another part at the same time, {kind: 'context', bar, snippet} for the
  *   same words elsewhere, or {kind: 'word', word} for a word with a neighbour; homophones are the other common
- *   characters of the reading; together lists pinyin of the same reading sung at the same time in other parts.
+ *   characters of the reading; together lists pinyin of the same reading sung at the same time in other parts. A
+ *   confident candidate comes from the song itself (same time, or the same reading with matching neighbours); bar,
+ *   before and after place the lyric for a list of them.
  */
 export function findLyricCandidates(tracks, meters, {limit = 6} = {}) {
   const lines = (tracks ?? []).map(track => ({track, syllables: trackSyllables(track)}));
@@ -169,7 +171,7 @@ export function findLyricCandidates(tracks, meters, {limit = 6} = {}) {
         const context = contextMatch(line.syllables, i, other.syllables, k);
         const sameTime = other !== line && Math.abs(source.onset - target.onset) <= SAME_TIME;
         if (sameTime) offer(source.text, 10 + context, {kind: 'time', trackName: other.track.name});
-        else offer(source.text, context > 0 ? 2 + context * 2 : 1, {kind: 'context', bar: barOf(source.onset), snippet: snippet(other.syllables, k)});
+        else offer(source.text, context > 0 ? 2 + context * 2 : 1, {kind: 'context', bar: barOf(source.onset), snippet: snippet(other.syllables, k), matched: Math.round(context * 100) / 100});
       }
       for (const [neighbour, before] of [[line.syllables[i - 1], true], [line.syllables[i + 1], false]]) {
         for (const {text, word} of wordsWith(target.reading, neighbour, before)) offer(text, 6, {kind: 'word', word});
@@ -187,8 +189,11 @@ export function findLyricCandidates(tracks, meters, {limit = 6} = {}) {
         .map(entry => ({...entry, score: entry.score + Math.min(1, (entry.count - 1) * 0.2)}))
         .sort((a, b) => b.score - a.score || a.text.localeCompare(b.text))
         .slice(0, limit)
-        .map(({text, source}) => ({text, source}));
-      results.push({trackId: line.track.id, noteIndex: target.noteIndex, reading: target.reading, candidates, homophones, together});
+        // The song's own sources to fill in without asking each time: another part at the same time, or the same
+        // reading where the neighbouring syllables match too.
+        .map(({text, source}) => ({text, source, confident: source.kind === 'time' || (source.kind === 'context' && source.matched > 0)}));
+      const around = (from, to) => line.syllables.slice(Math.max(0, from), Math.max(0, to)).map(syllable => syllable.text);
+      results.push({trackId: line.track.id, noteIndex: target.noteIndex, reading: target.reading, bar: barOf(target.onset), before: around(i - 3, i), after: around(i + 1, i + 3), candidates, homophones, together});
     });
   }
   return results;

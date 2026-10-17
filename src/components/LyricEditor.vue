@@ -13,7 +13,7 @@ const MARK = {same: 'exact', change: 'change', low: 'low', none: 'none'};
 const LEGEND = [['change', 'lyricEditor.markChange'], ['same', 'lyricEditor.markSame'], ['low', 'lyricEditor.markLow'], ['none', 'lyricEditor.markNone']];
 
 const props = defineProps({project: {type: Object, required: true}});
-const emit = defineEmits(['change']);
+const emit = defineEmits(['change', 'self-check']);
 const revision = ref(0);
 const tracks = computed(() => props.project.tracks);
 
@@ -189,9 +189,11 @@ function barsOf(voice) {
     <div class="lyric-editor__card lyric-editor__paste">
       <div class="lyric-editor__row">
         <label for="lyric-editor-paste">{{ t('lyricEditor.correctTitle') }}</label>
-        <div class="lyric-editor__segments" role="radiogroup" :aria-label="t('lyricEditor.writeAs')">
-          <span>{{ t('lyricEditor.writeAs') }}</span>
-          <button v-for="mode in ['typed', 'pinyin']" :key="mode" type="button" role="radio" :aria-checked="writeMode === mode" :class="{active: writeMode === mode}" @click="writeMode = mode">{{ t(mode === 'typed' ? 'lyricEditor.writeText' : 'lyricEditor.writeReading') }}</button>
+        <div class="lyric-editor__write">
+          <div class="lyric-editor__segments" role="radiogroup" :aria-label="t('lyricEditor.writeAs')">
+            <button v-for="mode in ['typed', 'pinyin']" :key="mode" type="button" role="radio" :aria-checked="writeMode === mode" :class="{active: writeMode === mode}" @click="writeMode = mode">{{ t(mode === 'typed' ? 'lyricEditor.writeText' : 'lyricEditor.writeReading') }}</button>
+          </div>
+          <button id="self-check-button" type="button" class="lyric-editor__check" :title="t('用本曲其他声部和前后同句的汉字补全拼音歌词')" @click="emit('self-check')">{{ t('自校') }}</button>
         </div>
       </div>
       <MarkedTextarea input-id="lyric-editor-paste" v-model="text" :spans="spans" :active="caretIndex" :min-rows="5" label="粘贴歌词文本" :placeholder="t('lyricEditor.correctPlaceholder')" @caret="caretAt = $event" />
@@ -243,6 +245,9 @@ function barsOf(voice) {
 .lyric-editor__row label{font-size:13px;font-weight:600}
 .lyric-editor__segments{display:inline-flex;align-items:center;gap:4px;color:var(--fluent-muted,rgb(93 93 93));font-size:11px}
 .lyric-editor__segments button{padding:2px 9px;border:1px solid var(--fluent-border,rgba(0,0,0,.14));border-radius:12px;background:transparent;color:inherit;font:inherit;cursor:pointer}
+.lyric-editor__write{display:inline-flex;align-items:center;gap:6px}
+.lyric-editor__check{padding:2px 10px;border:1px solid #c45911;border-radius:12px;background:transparent;color:#c45911;font:inherit;font-size:11px;cursor:pointer}
+.lyric-editor__check:hover{background:rgb(196 89 17 / 10%)}
 .lyric-editor__segments button.active{border-color:var(--fluent-accent,#0067c0);background:rgb(0 103 192 / .1);color:var(--fluent-text,rgb(27 27 27))}
 .lyric-editor__legend{display:flex;flex-wrap:wrap;gap:4px 12px;color:var(--fluent-muted,rgb(93 93 93));font-size:11px}
 .lyric-editor__caret{min-height:18px;margin:0;color:var(--fluent-muted,rgb(93 93 93));font-size:11px;overflow-wrap:anywhere}
