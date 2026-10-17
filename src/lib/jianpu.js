@@ -428,7 +428,7 @@ export async function renderJianpu(xml, container, {
   const pageCount = Math.max(1, Math.ceil(systems.length / systemsPerPage));
   const svgs = [];
   const eventPositions = new Map();
-  const styleText = `.jianpu-note{font-size:24px;fill:#111}.jianpu-lyric{font-size:${safeLyricFontSize}px;fill:#333}.jianpu-rhythm,.jianpu-tie{stroke:#111;stroke-width:1.5;fill:none}.jianpu-tuplet,.jianpu-slide{stroke:#111;stroke-width:1;fill:none}.jianpu-grace{font-size:12px;fill:#111}.jianpu-tuplet-number{font-size:11px;font-style:italic;fill:#111}.jianpu-sustain{font-size:20px;fill:#111}.jianpu-dot,.jianpu-octave-dot{fill:#111}.jianpu-bar{stroke:#888;stroke-width:1}.jianpu-label{font-size:14px;fill:#222}.jianpu-system-change{font-size:12px;fill:#444}.jianpu-annotation{fill:#4b5563}.jianpu-measure{font-size:12px;fill:#777}.jianpu-page{display:block;max-width:100%;height:auto;margin:0 auto 18px}@media print{@page{size:A4 portrait;margin:10mm}.jianpu-page{width:190mm;height:auto;max-width:none;margin:0;break-after:page;page-break-after:always}.jianpu-page:last-of-type{break-after:auto;page-break-after:auto}}`;
+  const styleText = `.jianpu-note{font-size:24px;fill:#111}.jianpu-lyric{font-size:${safeLyricFontSize}px;fill:#333}.jianpu-rhythm,.jianpu-tie{stroke:#111;stroke-width:1.5;fill:none}.jianpu-tuplet,.jianpu-slide{stroke:#111;stroke-width:1;fill:none}.jianpu-grace{font-size:12px;fill:#111}.jianpu-tuplet-number{font-size:11px;font-style:italic;fill:#111}.jianpu-sustain{font-size:20px;fill:#111}.jianpu-dot,.jianpu-octave-dot{fill:#111}.jianpu-bar{stroke:#888;stroke-width:1}.jianpu-final-bar{fill:#333}.jianpu-label{font-size:14px;fill:#222}.jianpu-system-change{font-size:12px;fill:#444}.jianpu-annotation{fill:#4b5563}.jianpu-measure{font-size:12px;fill:#777}.jianpu-page{display:block;max-width:100%;height:auto;margin:0 auto 18px}@media print{@page{size:A4 portrait;margin:10mm}.jianpu-page{width:190mm;height:auto;max-width:none;margin:0;break-after:page;page-break-after:always}.jianpu-page:last-of-type{break-after:auto;page-break-after:auto}}`;
   for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
     const pageSystems = systems.slice(pageIndex * systemsPerPage, (pageIndex + 1) * systemsPerPage);
     const pageHeight = maxPageHeight;
@@ -465,6 +465,11 @@ export async function renderJianpu(xml, container, {
           text(svg, annotation.text, { x: Math.min(x0 + widthHere - 4, annotationX), y: yTop + 40, "text-anchor": annotationX > x0 + widthHere - 20 ? "end" : "start", class: "jianpu-annotation", "font-size": annotation.fontSize });
         }
         el("line", { x1: x0 + widthHere, x2: x0 + widthHere, y1: yTop + 22, y2: yBottom, class: "jianpu-bar" }, svg);
+        // The last bar ends with a final barline: a thin line and a thick one.
+        if (measure === measures.at(-1)) {
+          el("line", { x1: x0 + widthHere - 5, x2: x0 + widthHere - 5, y1: yTop + 22, y2: yBottom, class: "jianpu-bar" }, svg);
+          el("rect", { x: x0 + widthHere - 1, y: yTop + 22, width: 3, height: yBottom - yTop - 22, class: "jianpu-final-bar" }, svg);
+        }
         for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
           const line = measure.lines[partIndex];
           const y = yTop + voiceOffset + partIndex * partSpacing;

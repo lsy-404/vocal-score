@@ -459,7 +459,8 @@ function pieceXml(piece, fifths, measureIndex, partIndex, laneIndex, percussion 
   const ties = `${tieIn ? '<tie type="stop"/>' : ''}${tieOut ? '<tie type="start"/>' : ''}`;
   const tied = `${tieIn ? '<tied type="stop"/>' : ''}${tieOut ? '<tied type="start"/>' : ''}`;
   // A melisma slur opens on the first written piece of its first note and closes on the last piece of its last note.
-  const slur = `${span.note.slur === 'start' && piece.index === 0 && !span.before ? '<slur number="1" type="start"/>' : ''}${span.note.slur === 'stop' && piece.last && !span.after ? '<slur number="1" type="stop"/>' : ''}`;
+  // Vocal slurs go above the staff, clear of the lyrics.
+  const slur = `${span.note.slur === 'start' && piece.index === 0 && !span.before ? '<slur number="1" type="start" placement="above"/>' : ''}${span.note.slur === 'stop' && piece.last && !span.after ? '<slur number="1" type="stop"/>' : ''}`;
   // A glide's slide runs from the end of the syllable's note to the start of the next note.
   const opening = piece.index === 0 && !span.before;
   const slide = `${span.note.slideIn && opening ? '<slide number="1" type="stop"/>' : ''}${span.note.slideOut && piece.last && !span.after ? '<slide number="1" type="start" line-type="solid"/>' : ''}`;
@@ -1058,7 +1059,8 @@ export function createScore(project, { trackIds, grid = 16, transpose = 0, fifth
         if (laneIndex > 0) voiceXml.push(`<backup><duration>${Math.round(measureLength)}</duration></backup>`);
         voiceXml.push(pieces.map(piece => pieceXml(piece, measureFifths[measureIndex], measureIndex, partIndex, laneIndex, clefs[partIndex] === 'percussion', style)).join(''));
       });
-      const barline = '<barline location="right"><bar-style>regular</bar-style></barline>';
+      // The last bar ends with a final barline (thin, thick).
+      const barline = `<barline location="right"><bar-style>${measureIndex === measures.length - 1 ? 'light-heavy' : 'regular'}</bar-style></barline>`;
       return `<measure number="${measureIndex + 1}">${attrs}${measureIndex === 0 && partIndex === 0 ? swingXml : ''}${directionXml}${voiceXml.join('')}${barline}</measure>`;
     }).join('');
     return { id, name: track.name, xml: `<part id="${id}">${body}</part>`, track };

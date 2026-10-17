@@ -30,10 +30,10 @@ const previewPages=shallowRef([]),pdfError=ref(''),textTargets=shallowRef([]),ex
 const error=ref(''),warnings=ref([]),storageState=ref('正在恢复文件…'),storageError=ref(false);
 function preferredTheme(){try{const value=localStorage.getItem('svp-vocal-score.theme');if(value)return value==='dark';}catch{}return matchMedia('(prefers-color-scheme: dark)').matches;}
 const dark=ref(preferredTheme());
-const defaults=()=>({grid:16,view:'staff',targetRange:'60,84',merge:true,mergeAcrossSingers:false,mergeOverlap:0.05,showSingers:false,showChords:false,showRepeats:true,useTuning:false,threshold:50,font:'serif',lyricSize:14,titleSize:24,headerSize:12,header:'',by:'',margin:10,modulation:true,triplets:true,noteMerge:'auto',glides:'line',melisma:'extender',tupletMarks:'bracket',swing:false,pageNumbers:true,measureNumbers:true,paperSize:'a4',orientation:'portrait'});
+const defaults=()=>({grid:16,view:'staff',targetRange:'60,84',merge:true,mergeAcrossSingers:false,mergeOverlap:0.05,showSingers:false,showChords:false,showRepeats:true,useTuning:false,threshold:50,font:'serif',lyricSize:14,titleSize:24,headerSize:12,header:'',by:'',margin:10,modulation:true,triplets:true,noteMerge:'auto',glides:'line',melisma:'both',tupletMarks:'bracket',swing:false,styleVersion:2,pageNumbers:true,measureNumbers:true,paperSize:'a4',orientation:'portrait'});
 const emptySettings=defaults();
 // Notation style presets: each sets how continuation notes merge, how glides and melismas are written, triplet marks and swing.
-const STYLE_PRESETS={lead:{noteMerge:'auto',glides:'line',melisma:'extender',tupletMarks:'bracket',swing:false},choral:{noteMerge:'auto',glides:'grace',melisma:'both',tupletMarks:'bracket',swing:false},clean:{noteMerge:'auto',glides:'absorb',melisma:'slur',tupletMarks:'simile',swing:true},source:{noteMerge:'none',glides:'keep',melisma:'extender',tupletMarks:'bracket',swing:false}};
+const STYLE_PRESETS={lead:{noteMerge:'auto',glides:'line',melisma:'both',tupletMarks:'bracket',swing:false},choral:{noteMerge:'auto',glides:'grace',melisma:'both',tupletMarks:'bracket',swing:false},clean:{noteMerge:'auto',glides:'absorb',melisma:'slur',tupletMarks:'simile',swing:true},source:{noteMerge:'none',glides:'keep',melisma:'extender',tupletMarks:'bracket',swing:false}};
 const STYLE_LABELS={lead:'流行旋律谱',choral:'合唱谱（标准记谱）',clean:'简洁',source:'原样（不合并）'};
 const current=computed(()=>documents.value.find(item=>item.id===activeId.value));
 const s=computed(()=>current.value?.settings||emptySettings);
@@ -173,13 +173,15 @@ async function importFiles(files){
   for(const file of files){
     try{
       if(!formatsFor(file.name).length)throw new Error(t('不支持此文件类型。'));
-      if(file.size>25*1024*1024)throw new Error(t('文件超过 25 MB，请缩小工程后再导入。'));
+      // FL Studio projects carry plugin states and can be large; the other formats are notes and parameters only.
+      const limit=formatsFor(file.name).some(format=>format.id==='flp')?512:100;
+      if(file.size>limit*1024*1024)throw new Error(t('文件超过 {size} MB，请缩小工程后再导入。',{size:limit}));
       const bytes=new Uint8Array(await file.arrayBuffer()),project=await importProject(bytes,file.name);
       // Instrumental projects start in score order; afterwards the part list order is the user's.
       if(project.tracks.some(track=>track.instrument))project.tracks.sort((a,b)=>(a.instrument?.order??80)-(b.instrument?.order??80));
       if(!project.tracks.length)throw new Error(t('工程中没有可转换的音符。'));
       const keys=estimateKeys(createScore(project).model);
-      last={id:crypto.randomUUID(),name:file.name,sourceFile:new Blob([bytes],{type:file.type||'application/octet-stream'}),project,title:project.title,selected:new Set(project.tracks.map(track=>track.id)),chordChoices:new Map(),transpose:0,fifths:keys[0]?.fifths??0,pitchMessage:{type:'estimate',key:keys[0]||null},settings:defaults()};
+      last={id:crypto.randomUUID(),name:file.name,sourceFile:new Blob([file],{type:file.type||'application/octet-stream'}),project,title:project.title,selected:new Set(project.tracks.map(track=>track.id)),chordChoices:new Map(),transpose:0,fifths:keys[0]?.fifths??0,pitchMessage:{type:'estimate',key:keys[0]||null},settings:defaults()};
       documents.value.push(last);await persist(last);
     }catch(cause){failures.push(`${file.name}: ${readableError(cause)}`);}
   }

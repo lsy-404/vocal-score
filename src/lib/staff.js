@@ -94,6 +94,27 @@ function tagPartNames(osmd, model, partLabels) {
   }
 }
 
+// OSMD reserves a lyric row only in systems that show lyric text, so a melisma carried into a new system had its
+// extender drawn through the notes or into the staff below. Systems break only at barlines: an invisible syllable on a
+// bar's first note, when that note only continues a melisma, keeps the row. Only the engraved copy changes.
+export function keepLyricRows(xml) {
+  let doc;
+  try { doc = new DOMParser().parseFromString(xml, 'application/xml'); } catch { return xml; }
+  if (doc.getElementsByTagName('parsererror').length) return xml;
+  let changed = false;
+  for (const measure of Array.from(doc.getElementsByTagName('measure'))) {
+    const first = Array.from(measure.childNodes).find(node => node.nodeType === 1 && node.localName === 'note' && !node.getElementsByTagName('grace').length);
+    if (!first || first.getElementsByTagName('rest').length) continue;
+    const lyric = Array.from(first.childNodes).find(node => node.nodeType === 1 && node.localName === 'lyric');
+    if (!lyric || lyric.getElementsByTagName('text').length || !lyric.getElementsByTagName('extend').length) continue;
+    const text = doc.createElement('text');
+    text.textContent = '\u00a0';
+    lyric.insertBefore(text, lyric.firstChild);
+    changed = true;
+  }
+  return changed ? new XMLSerializer().serializeToString(doc) : xml;
+}
+
 export async function renderStaffScore(container, xml, {
   paperSize = 'a4',
   orientation = 'portrait',
@@ -125,7 +146,7 @@ export async function renderStaffScore(container, xml, {
   osmd.EngravingRules.RenderMeasureNumbersOnlyAtSystemStart = false;
   // Triplet numbers follow the score's own tuplet marks (bracket, number alone or simile), not OSMD's repetition limit.
   osmd.EngravingRules.TupletNumberLimitConsecutiveRepetitions = false;
-  await osmd.load(xml);
+  await osmd.load(keepLyricRows(xml));
   osmd.Zoom = 1;
   osmd.render();
   tagLyricTargets(osmd, model);

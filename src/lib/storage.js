@@ -74,12 +74,19 @@ function timestamp(value) {
   return 0;
 }
 
+// The pop lead sheet preset as it was before it drew slurs over melismas (settings without a style version).
+const LEAD_SHEET_V1 = { noteMerge: 'auto', glides: 'line', melisma: 'extender', tupletMarks: 'bracket', swing: false };
+
 /**
  * Brings settings saved by older versions up to date. Projects saved before notation styles stored the old default
- * merge level 'low' as their own setting; they move to automatic merging like new projects.
+ * merge level 'low' as their own setting; they move to automatic merging like new projects. Projects saved with the pop
+ * lead sheet before it drew slurs follow the preset to slur + extender. Settings saved from now on carry styleVersion 2,
+ * so a style chosen later is never changed.
  */
 export function upgradeSettings(settings = {}) {
-  return settings.glides === undefined && settings.noteMerge === 'low' ? { ...settings, noteMerge: 'auto' } : settings;
+  let upgraded = settings.glides === undefined && settings.noteMerge === 'low' ? { ...settings, noteMerge: 'auto' } : settings;
+  if (upgraded.styleVersion === undefined && Object.entries(LEAD_SHEET_V1).every(([key, value]) => upgraded[key] === value)) upgraded = { ...upgraded, melisma: 'both' };
+  return upgraded;
 }
 
 export function loadDocuments() {
