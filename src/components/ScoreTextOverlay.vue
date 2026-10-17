@@ -3,7 +3,8 @@ import {computed,nextTick,ref,watch} from 'vue';
 import {t} from '../i18n.js';
 
 // suggestions: characters the song offers for lyrics typed as pinyin, by "trackId:noteIndex" (lyric-candidates.js).
-const props=defineProps({targets:{type:Array,default:()=>[]},pageNumber:{type:Number,required:true},disabled:Boolean,suggestions:{type:Map,default:()=>new Map()}});
+// openId: a target to open from outside (the pinyin button), by its id.
+const props=defineProps({targets:{type:Array,default:()=>[]},pageNumber:{type:Number,required:true},disabled:Boolean,suggestions:{type:Map,default:()=>new Map()},openId:{type:String,default:''}});
 const emit=defineEmits(['commit','fill']);
 const editing=ref(null),draft=ref(''),input=ref(null),withOthers=ref(true);
 const pageTargets=computed(()=>props.targets.filter(target=>target.pageNumber===props.pageNumber));
@@ -24,6 +25,7 @@ async function start(target){
 }
 function cancel(){editing.value=null;}
 watch(()=>props.targets,cancel);
+watch(()=>props.openId,id=>{const target=id&&pageTargets.value.find(item=>item.id===id);if(target)start(target);else if(id)cancel();});
 function save(){
   if(!editing.value||props.disabled)return;
   const target=editing.value;editing.value=null;
@@ -44,7 +46,7 @@ function fillPart(){
 <template>
   <div class="score-text-overlay" :aria-label="t('谱面文字编辑')">
     <button v-for="target in pageTargets" :key="target.id" type="button" class="score-text-target" :class="{'score-text-target--suggest':suggestionFor(target)?.candidates.length}" :style="position(target)" :disabled="disabled" :data-edit-kind="target.kind" :data-text-id="target.id" :aria-label="t('编辑 {text}',{text:target.text})" :title="t(suggestionFor(target)?.candidates.length?'有候选汉字，点击选择':'点击谱面文字可编辑')" @click="start(target)" />
-    <form v-if="editing" class="score-text-form" :class="{'score-text-form--wide':suggestion}" :style="{left:`${Math.min(editing.x*100,suggestion?55:65)}%`,top:`${editing.y*100}%`}" :aria-label="t('修改谱面文字')" @submit.prevent="save" @keydown.esc.prevent="cancel">
+    <form v-if="editing" class="score-text-form" :class="{'score-text-form--wide':suggestion}" :style="{left:`${Math.min(editing.x*100,suggestion?55:65)}%`,top:`${(editing.y+editing.height)*100+0.4}%`}" :aria-label="t('修改谱面文字')" @submit.prevent="save" @keydown.esc.prevent="cancel">
       <input ref="input" v-model="draft" class="fluent-field__input" :aria-label="t('修改谱面文字')" :maxlength="editing.kind==='lyric'?300:160" autocomplete="off">
       <div v-if="suggestion" class="score-text-candidates" role="group" :aria-label="t('候选汉字')">
         <button v-for="item in suggestion.candidates" :key="item.text" type="button" class="score-text-candidate" :title="sourceText(item.source)" @click="choose(item.text)"><b>{{ item.text }}</b><small>{{ sourceText(item.source) }}</small></button>
@@ -61,7 +63,8 @@ function fillPart(){
 .score-text-overlay{position:absolute;inset:0;pointer-events:none}
 .score-text-target{position:absolute;pointer-events:auto;padding:0;border:1px solid transparent;border-radius:2px;background:transparent;box-shadow:none;cursor:text;min-width:8px;min-height:10px}
 .score-text-target:hover,.score-text-target:focus-visible{outline:1px solid var(--fluent-accent,#0078d4);background:rgb(0 120 212 / 10%)}
-.score-text-target--suggest{border-bottom:2px dotted rgb(196 89 17 / 80%);border-radius:0;cursor:pointer}
+.score-text-target--suggest{border-bottom:2px dotted rgb(196 89 17 / 90%);border-radius:2px 2px 0 0;background:rgb(255 140 0 / 16%);cursor:pointer}
+.score-text-target--suggest:hover{background:rgb(255 140 0 / 28%)}
 .score-text-target:disabled{pointer-events:none}
 .score-text-form{position:absolute;z-index:2;pointer-events:auto;width:clamp(140px,30%,300px);max-width:90%;padding:8px;border:1px solid var(--fluent-accent,#0078d4);border-radius:6px;background:var(--fluent-surface,#fff);box-shadow:0 4px 16px rgb(0 0 0 / 20%)}
 .score-text-form--wide{width:clamp(220px,42%,380px)}

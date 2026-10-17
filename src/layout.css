@@ -172,6 +172,7 @@ main{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0;paddin
 .sidebar-backdrop{display:none}
 .notice-button{margin-left:6px;padding:0 8px;border:1px solid var(--fluent-border);border-left:3px solid var(--fluent-warning);border-radius:var(--fluent-radius);background:transparent;color:var(--fluent-text);font:inherit;cursor:pointer}
 .notice-button:hover{background:var(--fluent-control)}
+.pinyin-button{border-left-color:#c45911}
 .notice-panel{margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--fluent-border);font-size:12px}
 .notice-panel>h2{margin:0 0 6px;padding:4px 2px 0;font-size:12px;font-weight:600}
 .notice-panel>h2 span{margin-left:8px;font-size:11px;font-weight:400;color:var(--fluent-muted)}
