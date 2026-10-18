@@ -12,7 +12,9 @@ input,select{min-width:0}
 .topbar{position:relative;z-index:1;display:flex;align-items:center;gap:10px;height:52px;padding:0 16px 0 14px;border-bottom:1px solid var(--fluent-border);background:var(--fluent-mica);backdrop-filter:blur(20px)}
 .brand{display:flex;align-items:center;gap:10px;color:var(--fluent-text);font-size:17px;font-weight:600;text-decoration:none}
 .brand-logo{display:block;border-radius:7px}
-.main-menu-link{display:inline-flex;align-items:center;gap:6px;margin-right:auto;padding:0 9px;white-space:nowrap;text-decoration:none}
+.main-menu-link{display:inline-flex;align-items:center;gap:6px;padding:0 9px;white-space:nowrap;text-decoration:none}
+/* Keeps the theme and language controls on the right whether or not a return link is shown. */
+#theme-button{margin-left:auto}
 .main-menu-short{display:none}
 .topbar .fluent-button{min-height:30px;font-size:12px;box-shadow:none}
 .language-picker select{width:104px;min-height:30px;font-size:12px}

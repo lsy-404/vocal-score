@@ -4,6 +4,7 @@ import {createScore} from './lib/converter.js';
 import {ACCEPT,FORMATS,formatsFor,importProject} from './lib/importers/index.js';
 import {renderJianpu} from './lib/jianpu.js';
 import {renderStaffScore} from './lib/staff.js';
+import {readHomeUrl} from './lib/home-url.js';
 import {analyzeScore,estimateKeys,recommendTranspose} from './lib/analysis.js';
 import {annotateScore,annotateSingers,scoreMetadata,singerPartLabels} from './lib/annotations.js';
 import {decoratePages} from './lib/page-layout.js';
@@ -24,6 +25,7 @@ import ScoreTextOverlay from './components/ScoreTextOverlay.vue';
 import ScoreViewer from './components/ScoreViewer.vue';
 import StartupScreen from './components/StartupScreen.vue';
 import logoUrl from './assets/logo.svg';
+const homeUrl=readHomeUrl();
 const loadLyricEditor=()=>import('./components/LyricEditor.vue');
 const LyricEditor=defineAsyncComponent(loadLyricEditor);
 
@@ -383,7 +385,7 @@ onBeforeUnmount(()=>{clearTimeout(scheduled);renderController?.abort();window.re
   <Transition name="startup-fade"><StartupScreen v-if="startupVisible" :steps="startupSteps" :ready="startupReady"/><SelfCheckDialog :open="selfCheckOpen" :rows="selfCheckRows" :track-names="trackNames" @apply="applySelfCheck" @close="selfCheckOpen=false"/></Transition>
   <header class="topbar" :inert="startupVisible||undefined" :aria-hidden="startupVisible||undefined">
     <a class="brand" href="./" :aria-label="t('织音机首页')"><img class="brand-logo" :src="logoUrl" alt="" width="30" height="30"><span>{{ t('织音机') }}</span></a>
-    <a class="main-menu-link fluent-button fluent-button--subtle" href="/" :aria-label="t('返回 Tiny Projects 主菜单')"><span aria-hidden="true">←</span><span class="main-menu-label">{{ t('返回主菜单') }}</span><span class="main-menu-short" aria-hidden="true">{{ t('主菜单') }}</span></a>
+    <a v-if="homeUrl" class="main-menu-link fluent-button fluent-button--subtle" :href="homeUrl" :aria-label="t('返回 Tiny Projects 主菜单')"><span aria-hidden="true">←</span><span class="main-menu-label">{{ t('返回主菜单') }}</span><span class="main-menu-short" aria-hidden="true">{{ t('主菜单') }}</span></a>
     <button id="theme-button" class="fluent-button fluent-button--subtle" :aria-pressed="dark" :aria-label="t(dark?'切换浅色主题':'切换深色主题')" @click="dark=!dark">{{ t(dark?'浅色':'深色') }}</button>
     <LanguagePicker/>
   </header>

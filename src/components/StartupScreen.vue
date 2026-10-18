@@ -1,14 +1,16 @@
 <script setup>
 import {t} from '../i18n.js';
+import {readHomeUrl} from '../lib/home-url.js';
 
 // Startup checks run by App: each step is {id, label, status: 'pending' | 'ok' | 'warn' | 'fail', detail}.
 defineProps({steps: {type: Array, default: () => []}, ready: Boolean});
 const marks = {pending: '', ok: '✓', warn: '!', fail: '×'};
+const homeUrl = readHomeUrl();
 </script>
 
 <template>
   <div class="startup" role="status" aria-live="polite" :aria-busy="!ready">
-    <a class="startup__menu fluent-button fluent-button--subtle" href="/" :aria-label="t('返回 Tiny Projects 主菜单')"><span aria-hidden="true">←</span>{{ t('返回主菜单') }}</a>
+    <a v-if="homeUrl" class="startup__menu fluent-button fluent-button--subtle" :href="homeUrl" :aria-label="t('返回 Tiny Projects 主菜单')"><span aria-hidden="true">←</span>{{ t('返回主菜单') }}</a>
     <div class="startup__card">
       <svg class="startup__logo" viewBox="0 0 64 64" aria-hidden="true">
         <defs><linearGradient id="startup-logo" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b9cec"/><stop offset="1" stop-color="#1c5ea8"/></linearGradient></defs>
