@@ -51,14 +51,15 @@ function applyStylePreset(name){if(STYLE_PRESETS[name]&&current.value)Object.ass
 const result=computed(()=>rendered.value?.result);
 const playback=reactive(usePlayback({document:current,songs,addSong,model:computed(()=>result.value?.model),marks:playbackMarks,reveal:spot=>viewer.value?.reveal(spot),translate:t}));
 // Songs: audio a synthesizer exported, kept in this browser apart from documents. A document names the song it plays along with.
-const SONG_LIMIT_MB=300,AUDIO_EXTENSIONS=new Set(['wav','mp3','flac','ogg','oga','m4a','aac','opus','webm','aif','aiff']);
+// Projects and songs share one limit, about the most a browser reads into memory at once; files stay on this device.
+const FILE_LIMIT_MB=2048,AUDIO_EXTENSIONS=new Set(['wav','mp3','flac','ogg','oga','m4a','aac','opus','webm','aif','aiff']);
 const AUDIO_ACCEPT=`${ACCEPT},${[...AUDIO_EXTENSIONS].map(extension=>`.${extension}`).join(',')},audio/*`;
 const isAudio=file=>!formatsFor(file.name).length&&(AUDIO_EXTENSIONS.has(file.name.split('.').pop()?.toLowerCase())||String(file.type).startsWith('audio/'));
 const fileStem=name=>String(name).replace(/\.[^.]+$/u,'').trim().toLowerCase();
 const songUsers=song=>documents.value.filter(item=>item.settings.songId===song.id).length;
 function songInfo(song){const users=songUsers(song);return `${(song.size/1048576).toFixed(1)} MB · ${users?t('已挂到 {count} 个工程',{count:users}):t('未挂接')}`;}
 async function addSong(file){
-  if(file.size>SONG_LIMIT_MB*1024*1024)throw new Error(t('音频文件超过 {size} MB。',{size:SONG_LIMIT_MB}));
+  if(file.size>FILE_LIMIT_MB*1024*1024)throw new Error(t('音频文件超过 {size} MB。',{size:FILE_LIMIT_MB}));
   const blob=new Blob([file],{type:file.type||'application/octet-stream'}),song={id:crypto.randomUUID(),name:file.name,type:blob.type,size:blob.size,blob,updatedAt:Date.now()};
   songs.value=[song,...songs.value];
   try{await saveSong(song);}catch{storageMessage('无法保存音频，刷新后需重新打开。',true);}
@@ -216,9 +217,7 @@ async function importFiles(files){
     try{
       if(isAudio(file)){const song=await addSong(file);if(last)activeId.value=last.id;attachNewSong(song);continue;}
       if(!formatsFor(file.name).length)throw new Error(t('不支持此文件类型。'));
-      // FL Studio projects carry plugin states and can be large; the other formats are notes and parameters only.
-      const limit=formatsFor(file.name).some(format=>format.id==='flp')?512:100;
-      if(file.size>limit*1024*1024)throw new Error(t('文件超过 {size} MB，请缩小工程后再导入。',{size:limit}));
+      if(file.size>FILE_LIMIT_MB*1024*1024)throw new Error(t('文件超过 {size} MB，请缩小工程后再导入。',{size:FILE_LIMIT_MB}));
       const bytes=new Uint8Array(await file.arrayBuffer()),project=await importProject(bytes,file.name);
       // Instrumental projects start in score order; afterwards the part list order is the user's.
       if(project.tracks.some(track=>track.instrument))project.tracks.sort((a,b)=>(a.instrument?.order??80)-(b.instrument?.order??80));
