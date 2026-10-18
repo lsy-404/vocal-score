@@ -16,6 +16,15 @@ pnpm check
 
 开发时运行 `pnpm dev`。`pnpm build` 把静态文件写入 `dist/`，`pnpm preview`（`node test/server.js`）在 <http://127.0.0.1:4190/> 提供构建结果。Tiny Projects 构建时以 `--outDir` 把同一产物写入门户的 `projects/vocal-score/`。工具使用 Vue 单文件组件和 Vue I18n，无需后端。运行依赖与字体随构建包含，不从 CDN 加载。
 
+宿主约定：页面只读取宿主写入的两个 meta，缺省时行为与独立网站一致。
+
+- `<meta name="home-url" content="…">`：显示指向该地址的“返回主菜单”。
+- `<meta name="embed-host-origins" content="源 源 …">`：允许以空格分隔列出的源把织音机放进框架里（如 [Synthesizer V Toolbox](https://github.com/SynthVCopilot/synthv-toolbox) 的“转换 → 织音机”）。`*` 与 `null` 会被忽略。双方只经 `postMessage` 交换消息，宿主不加载、也不链接织音机的代码。消息格式为 `{protocol: 'vocal-score-embed', version: 1, type, …}`，织音机只接受来自父窗口且源在列表中的消息（`src/lib/embed-host.js`）：
+  - 织音机 → 宿主：`ready {formats}`，在恢复浏览器中保存的工程之后发出；`save-file {name, mime, data: Blob}`；`open-link {url}`。
+  - 宿主 → 织音机：`hello {capabilities, language}`，回应 `ready`，`capabilities` 可含 `save-file` 与 `open-link`；`open-files {files: File[]}`，与拖入文件相同；`set-language {language}`。
+  - 收到 `hello` 之前，以及宿主未声明的能力，都保持浏览器行为：下载仍由页面保存，`target="_blank"` 链接仍在新窗口打开。
+  - 双方版本不必一致：`version` 只用于诊断，不参与校验；协议只做增补，不认识的消息类型和字段一律忽略。
+
 功能：
 
 - 输入格式：Synthesizer V（.svp、.s5p）、ACE Studio（.acep）、VOCALOID（.vsqx、.vpr、.vsq、VOCALOID MIDI）、UTAU（.ust）、OpenUtau（.ustx）、CeVIO（.ccs）、VoiSona（.tssln）、DeepVocal（.dv）、Piapro Studio NT（.ppsf）、MusicXML（.musicxml、.xml、.mxl）、UtaFormatix（.ufdata）、标准 MIDI（.mid）与 FL Studio 12 及以上（.flp）。除 SVP 外均为 Beta，解析器在 `src/lib/importers/`，按需加载。格式处理参考 UtaFormatix3（Apache-2.0），ACE Studio 与 DeepVocal 另参考 LibreSVIP，VoiSona 参考 valuetree-ts。

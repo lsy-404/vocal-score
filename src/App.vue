@@ -5,6 +5,7 @@ import {ACCEPT,FORMATS,formatsFor,importProject} from './lib/importers/index.js'
 import {renderJianpu} from './lib/jianpu.js';
 import {renderStaffScore} from './lib/staff.js';
 import {readHomeUrl} from './lib/home-url.js';
+import {connectEmbedHost} from './lib/embed-host.js';
 import {analyzeScore,estimateKeys,recommendTranspose} from './lib/analysis.js';
 import {annotateScore,annotateSingers,scoreMetadata,singerPartLabels} from './lib/annotations.js';
 import {decoratePages} from './lib/page-layout.js';
@@ -14,7 +15,7 @@ import {warmLyricAlignment,suggestLyrics} from './lib/lyric-worker.js';
 import {collectScoreTextTargets,applyScoreTextEdit,pdfTextRectangle} from './lib/score-text.js';
 import {collectPlaybackMarks,PLAYBACK_MARK_CLASS} from './lib/playback.js';
 import {usePlayback} from './lib/use-playback.js';
-import {t,i18n} from './i18n.js';
+import {t,i18n,setLanguage} from './i18n.js';
 import {translateWarning,translateError,groupWarnings} from './ui-messages.js';
 import FluentCheckbox from './components/FluentCheckbox.vue';
 import LanguagePicker from './components/LanguagePicker.vue';
@@ -26,6 +27,7 @@ import ScoreViewer from './components/ScoreViewer.vue';
 import StartupScreen from './components/StartupScreen.vue';
 import logoUrl from './assets/logo.svg';
 const homeUrl=readHomeUrl();
+let embedHost=null;
 const loadLyricEditor=()=>import('./components/LyricEditor.vue');
 const LyricEditor=defineAsyncComponent(loadLyricEditor);
 
@@ -258,7 +260,7 @@ function autoTranspose(){
 const chordKey=chord=>`${chord.measureIndex}:${chord.offset}`;
 const selectedChord=chord=>current.value.chordChoices.has(chordKey(chord))?current.value.chordChoices.get(chordKey(chord)):chord.candidates[0]?.symbol;
 function chordBeat(chord){const meter=result.value.model.measures[chord.measureIndex]?.meter;return Number((1+chord.offset/(result.value.model.divisions*4/(meter?.denominator||4))).toFixed(2));}
-function download(data,suffix,mime){const name=(current.value?.title||t('织音机')).replace(/[\\/:*?"<>|\x00-\x1f]/g,'_');const url=URL.createObjectURL(new Blob([data],{type:mime}));const anchor=document.createElement('a');anchor.href=url;anchor.download=name+suffix;anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+function download(data,suffix,mime){const name=(current.value?.title||t('织音机')).replace(/[\\/:*?"<>|\x00-\x1f]/g,'_'),blob=new Blob([data],{type:mime});if(embedHost?.saveFile(name+suffix,blob))return;const url=URL.createObjectURL(blob);const anchor=document.createElement('a');anchor.href=url;anchor.download=name+suffix;anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function exportXml(){if(canExport.value)download(result.value.xml,'.musicxml','application/vnd.recordare.musicxml+xml;charset=utf-8');}
 function exportSvg(){
   if(!canExport.value)return;const pages=[...score.value.querySelectorAll('svg')].filter(svg=>!svg.parentElement.closest('svg')),combined=document.createElementNS('http://www.w3.org/2000/svg','svg');combined.setAttribute('xmlns','http://www.w3.org/2000/svg');let height=0,width=0;
@@ -377,8 +379,10 @@ onMounted(async()=>{
   await pause(matchMedia('(prefers-reduced-motion: reduce)').matches?0:450);
   startupVisible.value=false;
   await restoreDocuments();
+  // A desktop host that frames the app can hand it projects once saved ones are back; see lib/embed-host.js.
+  embedHost=connectEmbedHost({formats:[...new Set(FORMATS.flatMap(format=>format.extensions))],onOpenFiles:importFiles,onLanguage:language=>{try{setLanguage(language);}catch{}}});
 });
-onBeforeUnmount(()=>{clearTimeout(scheduled);renderController?.abort();window.removeEventListener('dragover',preventDrop);window.removeEventListener('drop',preventDrop);});
+onBeforeUnmount(()=>{embedHost?.disconnect();clearTimeout(scheduled);renderController?.abort();window.removeEventListener('dragover',preventDrop);window.removeEventListener('drop',preventDrop);});
 </script>
 
 <template>
