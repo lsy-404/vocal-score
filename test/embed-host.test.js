@@ -128,4 +128,7 @@ test('the app connects after saved projects are restored and routes downloads th
   assert.match(source, /await restoreDocuments\(\);\s*\/\/[^\n]*\n\s*embedHost=connectEmbedHost\(/);
   assert.match(source, /if\(embedHost\?\.saveFile\(name\+suffix,blob\)\)return;const url=URL\.createObjectURL\(blob\)/);
   assert.match(source, /onBeforeUnmount\(\(\)=>\{embedHost\?\.disconnect\(\);/);
+  // A language the host sets after the page started must show in the picker too.
+  const picker = await readFile(new URL('../src/components/LanguagePicker.vue', import.meta.url), 'utf8');
+  assert.match(picker, /const selected = computed\(\{get: getLanguage, set: setLanguage\}\);/);
 });
